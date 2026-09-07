@@ -1,0 +1,42 @@
+# upside-down-ternet :: logging proxy
+#
+# HTTP  (3128) is intercepted, logged, then handed to the flip proxy.
+# HTTPS (3130) is intercepted and SPLICED -- squid records the SNI hostname and
+# passes the TLS session through untouched. Nothing is decrypted: there is no
+# CA, no certificate generation, and no ability to read message bodies. That is
+# deliberate. Domain-level attribution is the goal; interception of content is
+# not, and would put every client's credentials at risk.
+
+http_port 3128 intercept
+https_port 3130 intercept ssl-bump generate-host-certificates=off \
+    tls-cert=/etc/squid/dummy.pem
+
+acl step1 at_step SslBump1
+ssl_bump peek step1
+ssl_bump splice all
+
+acl portalnet src __NET__
+http_access allow portalnet
+http_access deny all
+
+# Only ever proxy web ports.
+acl Safe_ports port 80 443
+acl CONNECT method CONNECT
+http_access deny !Safe_ports
+http_access deny CONNECT !Safe_ports
+
+# Hand cleartext HTTP to the flip proxy; CONNECT/TLS goes direct.
+acl httpsite proto HTTP
+cache_peer 127.0.0.1 parent __FLIP_PORT__ 0 no-query no-digest name=flipper
+cache_peer_access flipper allow httpsite
+cache_peer_access flipper deny all
+never_direct allow httpsite
+
+cache deny all
+forwarded_for delete
+via off
+
+logformat udt %ts.%03tu %>a %<a %mt %rm %ru %>Hs %<st %Ss:%Sh "%{User-Agent}>h"
+access_log /var/log/squid/access.log udt
+cache_log /var/log/squid/cache.log
+pid_filename /var/run/squid.pid

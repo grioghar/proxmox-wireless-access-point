@@ -1,0 +1,17 @@
+interface=__IFACE__
+driver=nl80211
+ctrl_interface=/var/run/hostapd
+ssid=__SSID__
+hw_mode=__HW_MODE__
+channel=__CHANNEL__
+ieee80211n=1
+wmm_enabled=1
+
+# Client isolation: stations cannot talk to each other over the air.
+ap_isolate=1
+
+# Open network -- the captive portal is the gate. If UDT_PASSPHRASE is set the
+# wizard appends WPA2 settings below this line.
+auth_algs=1
+macaddr_acl=0
+ignore_broadcast_ssid=0

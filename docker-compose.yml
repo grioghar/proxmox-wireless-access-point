@@ -1,0 +1,23 @@
+services:
+  upside-down-ternet:
+    build: .
+    image: upside-down-ternet:latest
+    container_name: upside-down-ternet
+    # The container drives a physical radio and rewrites the host firewall, so it
+    # must share the host network namespace. It CANNOT run on a different machine
+    # than the wireless card.
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_MODULE          # needed to load ifb/nf modules if absent
+    volumes:
+      - ./udt.conf:/etc/udt/udt.conf:ro
+      - udt-data:/var/lib/udt
+      - udt-logs:/var/log/squid
+      - /lib/modules:/lib/modules:ro
+    restart: unless-stopped
+
+volumes:
+  udt-data:
+  udt-logs:

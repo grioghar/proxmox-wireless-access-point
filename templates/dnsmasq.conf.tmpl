@@ -1,0 +1,16 @@
+interface=__IFACE__
+bind-interfaces
+listen-address=__GW__
+dhcp-range=__DHCP_START__,__DHCP_END__,12h
+dhcp-option=3,__GW__
+dhcp-option=6,__GW__
+# RFC 8910: hand modern clients the captive-portal URI directly, so the
+# "Sign in to network" sheet appears without waiting for a probe to fail.
+dhcp-option=114,"http://__GW__:8080/"
+domain-needed
+bogus-priv
+no-resolv
+server=__DNS1__
+server=__DNS2__
+dhcp-leasefile=/var/lib/udt/dnsmasq.leases
+log-dhcp
