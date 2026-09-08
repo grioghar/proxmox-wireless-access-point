@@ -8,6 +8,14 @@
   udtctl tiers                     show tier assignments
   udtctl kick <mac>                revoke authorization
   udtctl export [file.csv]         dump the consent ledger
+
+  udtctl allow <mac>               lab mode: let this device associate at all
+  udtctl deny <mac>                lab mode: remove it
+  udtctl allowed                   lab mode: list the allowlist
+
+  udtctl mitm <mac|email> on|off   opt a device into TLS interception. Only has
+                                   effect if that device has installed the CA;
+                                   otherwise its HTTPS simply fails.
 """
 import csv, os, sqlite3, subprocess, sys
 
@@ -89,6 +97,71 @@ def cmd_kick(args):
     print("revoked %s" % args[0])
 
 
+ALLOWED = os.environ.get("UDT_ALLOWED", "/etc/udt/allowed_macs")
+
+
+def _reload_hostapd():
+    if subprocess.run(["hostapd_cli", "-p", "/var/run/hostapd", "reload"],
+                      capture_output=True).returncode == 0:
+        return True
+    return subprocess.run(["pkill", "-HUP", "-x", "hostapd"],
+                          capture_output=True).returncode == 0
+
+
+def cmd_allow(args):
+    if not args:
+        print("usage: udtctl allow <mac> [note]", file=sys.stderr); sys.exit(1)
+    mac = args[0].lower()
+    os.makedirs(os.path.dirname(ALLOWED), exist_ok=True)
+    cur = []
+    if os.path.exists(ALLOWED):
+        cur = [l.strip() for l in open(ALLOWED) if l.strip()]
+    if any(l.split()[0].lower() == mac for l in cur if l and not l.startswith("#")):
+        print("%s is already allowed" % mac); return
+    with open(ALLOWED, "a") as fh:
+        fh.write("%s\n" % mac)
+    print("allowed %s%s" % (mac, " -- reloaded hostapd" if _reload_hostapd() else
+                            " (restart the service to apply)"))
+
+
+def cmd_deny(args):
+    if not args:
+        print("usage: udtctl deny <mac>", file=sys.stderr); sys.exit(1)
+    mac = args[0].lower()
+    if not os.path.exists(ALLOWED):
+        print("no allowlist yet"); return
+    keep = [l for l in open(ALLOWED) if l.strip().split(" ")[0].lower() != mac]
+    open(ALLOWED, "w").writelines(keep)
+    subprocess.run([NETSH, "deauthorize", mac], capture_output=True)
+    print("denied %s%s" % (mac, " -- reloaded hostapd" if _reload_hostapd() else ""))
+
+
+def cmd_allowed(_):
+    if not os.path.exists(ALLOWED):
+        print("no allowlist (lab mode not in use, or nothing added yet)"); return
+    n = 0
+    for line in open(ALLOWED):
+        if line.strip() and not line.startswith("#"):
+            print("  " + line.strip()); n += 1
+    print("%d device(s) may associate" % n)
+
+
+def cmd_mitm(args):
+    if len(args) < 2 or args[1] not in ("on", "off"):
+        print("usage: udtctl mitm <mac|email> on|off", file=sys.stderr); sys.exit(1)
+    c = db()
+    r = resolve(c, args[0])
+    c.close()
+    if not r:
+        print("no client matches %r" % args[0], file=sys.stderr); sys.exit(1)
+    mac = r[0]
+    if args[1] == "on":
+        print("Note: this only takes effect if the device has actually installed")
+        print("the CA. If it has not, its HTTPS will fail rather than be readable.")
+    subprocess.run([NETSH, "mitm-" + args[1], mac], capture_output=True)
+    print("interception %s for %s" % (args[1], mac))
+
+
 def cmd_export(args):
     out = args[0] if args else "udt-consent-ledger.csv"
     c = db()
@@ -116,6 +189,14 @@ def main():
         cmd_tiers(args)
     elif cmd == "kick":
         cmd_kick(args)
+    elif cmd == "allow":
+        cmd_allow(args)
+    elif cmd == "deny":
+        cmd_deny(args)
+    elif cmd == "allowed":
+        cmd_allowed(args)
+    elif cmd == "mitm":
+        cmd_mitm(args)
     elif cmd == "export":
         cmd_export(args)
     else:

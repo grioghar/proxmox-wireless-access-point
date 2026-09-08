@@ -2,7 +2,7 @@ FROM debian:trixie-slim
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         hostapd dnsmasq squid-openssl iptables iproute2 iw wireless-regdb \
-        imagemagick python3 openssl procps ca-certificates iputils-ping curl \
+        imagemagick python3 openssl procps ca-certificates iputils-ping curl mitmproxy \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/lib/udt /var/log/squid /var/run/hostapd /etc/udt
 

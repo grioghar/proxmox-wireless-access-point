@@ -29,6 +29,28 @@ RETENTION = int(CFG.get("UDT_RETENTION_DAYS", "30") or 0)
 SSID = CFG.get("UDT_SSID", "upside-down-ternet")
 PORT = 8080
 
+MITM_ENABLED = CFG.get("UDT_MITM", "0") == "1"
+MITM_HOST = CFG.get("UDT_MITM_CHECK_HOST", "mitm-check.udt")
+MITM_CPORT = CFG.get("UDT_MITM_CHECK_PORT", "8443")
+MITM_CA = os.environ.get("UDT_MITM_CA", "/var/lib/udt/mitm/mitmproxy-ca-cert.pem")
+MITM_VERIFIED = os.environ.get("UDT_MITM_VERIFIED", "/var/lib/udt/mitm-verified")
+VERIFY_WINDOW = 600  # seconds a successful handshake stays valid as proof
+
+
+def recently_verified(ip):
+    """True only if this IP completed a real TLS handshake against the check
+    endpoint recently. That handshake is impossible without trusting the CA, so
+    it is the one piece of evidence we accept for enabling interception."""
+    try:
+        now = time.time()
+        for line in open(MITM_VERIFIED):
+            f = line.split()
+            if len(f) == 2 and f[0] == ip and now - int(f[1]) < VERIFY_WINDOW:
+                return True
+    except Exception:
+        pass
+    return False
+
 OUI = {
     "00:1a:11": "Google", "3c:5a:b4": "Google", "f4:f5:d8": "Google",
     "00:03:93": "Apple", "a4:5e:60": "Apple", "f0:18:98": "Apple",
@@ -222,6 +244,81 @@ just entered, and to this device. That is exactly how much a stranger's open
 network can learn about you in under a minute.</div></div></body></html>"""
 
 
+MITM_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TLS interception</title><style>
+body{margin:0;background:#0d1117;color:#e6edf3;font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.w{max-width:560px;margin:0 auto;padding:28px 20px 60px}
+h1{font-size:21px;margin:0 0 6px}
+.sub{color:#8b949e;font-size:13px;margin-bottom:20px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px 18px;margin-bottom:16px}
+.warn{border-color:#d29922;background:#2a2011}
+a.btn,button{display:block;width:100%%;text-align:center;text-decoration:none;margin-top:14px;
+  padding:12px;border:0;border-radius:7px;font-size:15px;font-weight:600;cursor:pointer}
+a.btn{background:#1f6feb;color:#fff}
+button{background:#238636;color:#fff}
+ol{padding-left:20px;font-size:14px;color:#c9d1d9}
+li{margin:7px 0}
+code{background:#0d1117;border:1px solid #30363d;border-radius:4px;padding:1px 5px;font-size:13px}
+#s{margin-top:14px;font-size:14px}
+.ok{color:#7ee787}.bad{color:#ff9d95}
+</style></head><body><div class="w">
+<h1>TLS interception</h1>
+<div class="sub">Optional. Off unless you turn it on for this device.</div>
+
+<div class="card warn"><b>What this does.</b> With the certificate below installed,
+this network can read the full contents of your encrypted traffic — every URL,
+every request body, every response. Without it, nothing here can touch your HTTPS;
+you cannot be intercepted by accident. Install it only on a device you own and are
+deliberately debugging, and remove it when you are done.</div>
+
+<div class="card"><b>1. Install the certificate</b>
+<a class="btn" href="/ca.crt">Download CA certificate</a>
+<ol>
+<li><b>iOS:</b> download, then Settings &rarr; Profile Downloaded &rarr; Install.
+Then Settings &rarr; General &rarr; About &rarr; Certificate Trust Settings and
+switch it on. iOS deliberately makes this two separate steps.</li>
+<li><b>Android:</b> Settings &rarr; Security &rarr; Encryption &amp; credentials
+&rarr; Install a certificate &rarr; CA certificate.</li>
+<li><b>macOS:</b> open it in Keychain Access, then set it to Always Trust.</li>
+<li><b>Windows:</b> install into <code>Trusted Root Certification Authorities</code>.</li>
+</ol></div>
+
+<div class="card"><b>2. Prove it worked</b>
+<div class="sub" style="margin:6px 0 0">This fetches an HTTPS URL signed by that CA.
+It can only succeed if your device really trusts it.</div>
+<button id="v">Verify and enable for this device</button>
+<div id="s"></div></div>
+
+<div class="card"><b>Turn it back off</b>
+<div class="sub" style="margin:6px 0 0">Stops interception for this device immediately.
+Removing the certificate from your device is a separate step you should also do.</div>
+<button id="d" style="background:#6e2c2c">Disable interception</button></div>
+</div>
+<script>
+var S=document.getElementById("s");
+document.getElementById("v").onclick=function(){
+  S.textContent="Checking ...";S.className="";
+  fetch("https://%(host)s:%(cport)s/check",{cache:"no-store"})
+   .then(function(r){return r.json()})
+   .then(function(){
+      return fetch("/mitm/enable",{method:"POST"}).then(function(r){return r.text()})
+        .then(function(t){S.textContent=t;S.className="ok"});
+   })
+   .catch(function(){
+      S.innerHTML="Certificate is <b>not</b> trusted yet. Finish the install "+
+                  "steps above (on iOS the Certificate Trust Settings toggle is "+
+                  "the one people miss), then try again.";
+      S.className="bad";
+   });
+};
+document.getElementById("d").onclick=function(){
+  fetch("/mitm/disable",{method:"POST"}).then(function(r){return r.text()})
+   .then(function(t){S.textContent=t;S.className=""});
+};
+</script></body></html>"""
+
+
 class Portal(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "udt"
@@ -271,10 +368,57 @@ class Portal(BaseHTTPRequestHandler):
                            "facts": facts, "error": err, "retention": ret})
 
     def do_GET(self):
+        p = urlparse(self.path).path
+        if MITM_ENABLED and p == "/mitm":
+            return self._send(MITM_PAGE % {"host": MITM_HOST, "cport": MITM_CPORT})
+        if MITM_ENABLED and p == "/ca.crt":
+            try:
+                data = open(MITM_CA, "rb").read()
+            except OSError:
+                return self.send_error(404, "CA not generated yet")
+            self.send_response(200)
+            # this content type is what makes iOS/Android offer to install it
+            self.send_header("Content-Type", "application/x-x509-ca-cert")
+            self.send_header("Content-Disposition", 'attachment; filename="udt-ca.crt"')
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            self.close_connection = True
+            return
         self._render()
 
+    def _mitm_toggle(self, on):
+        ip, mac, _ = self._client()
+        if not mac:
+            return self._send("Could not identify this device.", 400, "text/plain")
+        if on:
+            if not recently_verified(ip):
+                return self._send(
+                    "Refused: this device has not proven it trusts the CA. "
+                    "Install the certificate first.", 403, "text/plain")
+            subprocess.run([NETSH, "mitm-on", mac], timeout=10, capture_output=True)
+            msg = "Interception ENABLED for %s. Your HTTPS is now readable here." % mac
+        else:
+            subprocess.run([NETSH, "mitm-off", mac], timeout=10, capture_output=True)
+            msg = "Interception disabled for %s." % mac
+        c = db()
+        c.execute("INSERT INTO events(ts,mac,ip,kind,detail) VALUES(?,?,?,?,?)",
+                  (time.strftime("%Y-%m-%dT%H:%M:%S"), mac, ip,
+                   "mitm-on" if on else "mitm-off", msg))
+        c.commit(); c.close()
+        return self._send(msg, 200, "text/plain")
+
     def do_POST(self):
-        if urlparse(self.path).path != "/consent":
+        p = urlparse(self.path).path
+        if MITM_ENABLED and p == "/mitm/enable":
+            return self._mitm_toggle(True)
+        if MITM_ENABLED and p == "/mitm/disable":
+            return self._mitm_toggle(False)
+        if p != "/consent":
             return self._render()
         n = int(self.headers.get("Content-Length") or 0)
         form = parse_qs(self.rfile.read(n).decode("utf-8", "replace"))

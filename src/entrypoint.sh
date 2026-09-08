@@ -20,8 +20,33 @@ if [ -n "${UDT_PASSPHRASE:-}" ]; then
   { echo "wpa=2"; echo "wpa_key_mgmt=WPA-PSK"; echo "rsn_pairwise=CCMP"
     echo "wpa_passphrase=${UDT_PASSPHRASE}"; } >> /etc/hostapd.conf
 fi
+# ---- lab mode: WPA2 + MAC allowlist ---------------------------------------
+if [ "${UDT_MODE:-public}" = "lab" ]; then
+  if [ -z "${UDT_PASSPHRASE:-}" ]; then
+    echo "FATAL: UDT_MODE=lab requires UDT_PASSPHRASE. A private lab should not" >&2
+    echo "       be an open network. Set one in udt.conf." >&2
+    exit 1
+  fi
+  touch /etc/udt/allowed_macs
+  n_allowed=$(grep -cvE '^\s*(#|$)' /etc/udt/allowed_macs || true)
+  if [ "${n_allowed:-0}" -gt 0 ]; then
+    { echo "macaddr_acl=1"; echo "accept_mac_file=/etc/udt/allowed_macs"; } >> /etc/hostapd.conf
+    echo "[udt] lab mode: WPA2 + MAC allowlist ($n_allowed device(s) permitted)"
+  else
+    # Enforcing an empty allowlist would lock you out with no way to discover
+    # your own MAC. WPA2 alone is the gate until you add the first device.
+    echo "[udt] lab mode: WPA2 only -- allowlist is empty, so it is not enforced."
+    echo "[udt]   add devices with 'udtctl allow <mac>' to lock this down further."
+  fi
+fi
+
 render /opt/udt/templates/dnsmasq.conf.tmpl > /etc/dnsmasq-udt.conf
 render /opt/udt/templates/squid.conf.tmpl   > /etc/squid/squid.conf
+
+# The cert-check hostname must resolve to us, and only for our own clients.
+if [ "${UDT_MITM:-0}" = "1" ]; then
+  echo "address=/${UDT_MITM_CHECK_HOST:-mitm-check.udt}/${UDT_GW}" >> /etc/dnsmasq-udt.conf
+fi
 
 # The AX200-class regulatory trap: many cards report country 00 until told
 # otherwise, which silently forbids 5 GHz AP mode. Set it before hostapd starts.
@@ -59,7 +84,33 @@ pkill -x squid 2>/dev/null || true
 rm -f /var/run/squid.pid
 sleep 1
 squid -N -f /etc/squid/squid.conf & pids+=($!)
+
+# ---- optional TLS interception --------------------------------------------
+# Started only when explicitly enabled. Even then it receives traffic solely
+# from devices carrying the 0x04 mark, which requires a proven CA handshake.
+if [ "${UDT_MITM:-0}" = "1" ]; then
+  export UDT_MITM_CONFDIR=/var/lib/udt/mitm
+  export UDT_MITM_CHECK_HOST UDT_MITM_CHECK_PORT
+  echo "[udt] preparing mitmproxy CA"
+  if python3 /opt/udt/mitm.py ensure-ca; then
+    mitmdump --mode transparent --showhost -q \
+             --set confdir=/var/lib/udt/mitm \
+             --listen-port "${UDT_MITM_PORT:-8081}" \
+             -w /var/lib/udt/mitm-flows & pids+=($!)
+    python3 /opt/udt/mitm.py check-server & pids+=($!)
+    echo "[udt] TLS interception ARMED (opt-in, cert-gated). CA: http://${UDT_GW}:8080/ca.crt"
+  else
+    echo "[udt] WARNING: mitmproxy CA unavailable; interception stays off" >&2
+  fi
+fi
+
 python3 /opt/udt/portal.py & pids+=($!)
+
+# Optionally shrink the radio so the cell does not spill past the building.
+if [ -n "${UDT_TXPOWER:-}" ]; then
+  iw dev "$UDT_IFACE" set txpower fixed "$UDT_TXPOWER" 2>/dev/null \
+    && echo "[udt] txpower fixed at ${UDT_TXPOWER} mBm"
+fi
 
 echo "[udt] up. portal at http://${UDT_GW}:8080/"
 wait -n

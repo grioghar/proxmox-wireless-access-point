@@ -18,7 +18,11 @@ UPLINK="${UDT_UPLINK:-vmbr0}"
 PORTAL_PORT=8080
 SQUID_HTTP=3128
 SQUID_HTTPS=3130
+MITM_PORT="${UDT_MITM_PORT:-8081}"
+# 0x80 bit = authorized, 0x04 bit = TLS interception opted in AND cert-verified.
+# Authorized therefore matches 0x83/0x83, which covers both 0x83 and 0x87.
 MARK=0x83
+MARK_MITM=0x87
 
 TIERS_FILE="${UDT_TIERS:-/var/lib/udt/tiers}"
 R_GUEST="${UDT_RATE:-128kbit}"
@@ -51,9 +55,12 @@ up() {
   # ---- NAT: portal capture + transparent proxy ------------------------------
   ipt -t nat -N UDT_NAT
   ipt -t nat -A PREROUTING -i "$IF" -j UDT_NAT
+  # TLS interception, if and only if this device is both opted in and verified
+  # as trusting the CA. Checked before the squid rule so it wins.
+  ipt -t nat -A UDT_NAT -p tcp --dport 443 -m mark --mark 0x04/0x04 -j REDIRECT --to-ports "$MITM_PORT"
   # authorized -> squid (logs; squid hands HTTP to the flip proxy as parent)
-  ipt -t nat -A UDT_NAT -p tcp --dport 80  -m mark --mark $MARK -j REDIRECT --to-ports $SQUID_HTTP
-  ipt -t nat -A UDT_NAT -p tcp --dport 443 -m mark --mark $MARK -j REDIRECT --to-ports $SQUID_HTTPS
+  ipt -t nat -A UDT_NAT -p tcp --dport 80  -m mark --mark 0x83/0x83 -j REDIRECT --to-ports $SQUID_HTTP
+  ipt -t nat -A UDT_NAT -p tcp --dport 443 -m mark --mark 0x83/0x83 -j REDIRECT --to-ports $SQUID_HTTPS
   # unauthorized -> captive portal (HTTP only; 443 is dropped so OS probes fire)
   ipt -t nat -A UDT_NAT -p tcp --dport 80 -j REDIRECT --to-ports $PORTAL_PORT
   ipt -t nat -A POSTROUTING -s "$NET" -o "$UPLINK" -j MASQUERADE
@@ -81,8 +88,8 @@ up() {
   ipt -A UDT_FWD -i "$IF" -m string --string "BitTorrent protocol" --algo bm \
       -j LOG --log-prefix "UDT-BT-BLOCK " --log-level 6 2>/dev/null
   ipt -A UDT_FWD -i "$IF" -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null
-  # authorized clients: web only
-  ipt -A UDT_FWD -i "$IF" -m mark --mark $MARK -p tcp -m multiport --dports 80,443 -j ACCEPT
+  # authorized clients: web only (0x83/0x83 matches plain and mitm-enabled alike)
+  ipt -A UDT_FWD -i "$IF" -m mark --mark 0x83/0x83 -p tcp -m multiport --dports 80,443 -j ACCEPT
   # everything else from the AP dies here
   ipt -A UDT_FWD -i "$IF" -m limit --limit 10/min -j LOG --log-prefix "UDT-DROP " --log-level 6
   ipt -A UDT_FWD -i "$IF" -j DROP
@@ -162,14 +169,24 @@ down() {
   ip addr flush dev "$IF" 2>/dev/null
 }
 
-authorize()   { ipt -t mangle -C UDT_MARK -m mac --mac-source "$1" -j MARK --set-mark $MARK 2>/dev/null \
-                || ipt -t mangle -A UDT_MARK -m mac --mac-source "$1" -j MARK --set-mark $MARK; }
-deauthorize() { ipt -t mangle -D UDT_MARK -m mac --mac-source "$1" -j MARK --set-mark $MARK 2>/dev/null; }
+mark_for() { ipt -t mangle -C UDT_MARK -m mac --mac-source "$1" -j MARK --set-mark "$2" 2>/dev/null \
+             || ipt -t mangle -A UDT_MARK -m mac --mac-source "$1" -j MARK --set-mark "$2"; }
+unmark()   { for m in "$MARK" "$MARK_MITM"; do
+               ipt -t mangle -D UDT_MARK -m mac --mac-source "$1" -j MARK --set-mark "$m" 2>/dev/null
+             done; }
+
+authorize()   { unmark "$1"; mark_for "$1" "$MARK"; }
+deauthorize() { unmark "$1"; }
+# Enabling interception is deliberately a separate verb from authorizing: a
+# device must be opted in AND have proven it trusts the CA before it lands here.
+mitm_on()     { unmark "$1"; mark_for "$1" "$MARK_MITM"; }
+mitm_off()    { unmark "$1"; mark_for "$1" "$MARK"; }
 list()        { ipt -t mangle -S UDT_MARK 2>/dev/null | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}'; }
 
 case "${1:-up}" in
   up) up ;; down) down ;; shape) shape ;;
   authorize) authorize "$2" ;; deauthorize) deauthorize "$2" ;; list) list ;;
+  mitm-on) mitm_on "$2" ;; mitm-off) mitm_off "$2" ;;
   tier) set_tier "$2" "$3" ;; tiers-apply) tiers_apply ;;
-  *) echo "usage: $0 up|down|shape|authorize <MAC>|deauthorize <MAC>|list|tier <IP> <guest|standard|trusted>|tiers-apply" >&2; exit 1 ;;
+  *) echo "usage: $0 up|down|shape|authorize <MAC>|deauthorize <MAC>|mitm-on <MAC>|mitm-off <MAC>|list|tier <IP> <guest|standard|trusted>|tiers-apply" >&2; exit 1 ;;
 esac

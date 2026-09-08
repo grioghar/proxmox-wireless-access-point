@@ -33,3 +33,24 @@ UDT_RETENTION_DAYS=30
 # Upstream DNS for portal clients
 UDT_DNS1=1.1.1.1
 UDT_DNS2=8.8.8.8
+
+# ---- deployment mode ------------------------------------------------------
+# public : open network, captive portal is the only gate (the demo/teaching AP)
+# lab    : WPA2 required + hostapd MAC allowlist. Nothing can even associate
+#          unless you have added its MAC with `udtctl allow <mac>`.
+UDT_MODE=public
+
+# Optionally shrink the cell so it does not spill past your walls.
+# Value is in mBm: 800 = 8 dBm. Blank = card maximum.
+UDT_TXPOWER=
+
+# ---- optional TLS interception (mitmproxy) --------------------------------
+# OFF by default. When enabled, a device is intercepted ONLY if both hold:
+#   1. you turned it on for that device  (udtctl mitm <mac> on)
+#   2. that device actually trusts the CA, proven by a live TLS handshake
+# Any device failing either test is spliced through untouched. There is no
+# way to intercept a device that has not installed the CA -- that is the point.
+UDT_MITM=0
+UDT_MITM_PORT=8081
+UDT_MITM_CHECK_PORT=8443
+UDT_MITM_CHECK_HOST=mitm-check.udt

@@ -18,7 +18,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
     hostapd dnsmasq squid-openssl iptables iproute2 iw wireless-regdb \
-    imagemagick python3 openssl curl >/dev/null
+    imagemagick python3 openssl curl mitmproxy >/dev/null
 
 # Debian's packaged units would fight ours for the same interfaces and ports.
 # squid in particular auto-starts on install and then refuses ours with
