@@ -52,8 +52,8 @@ fi
 hdr "Regulatory domain"
 SELF_MANAGED=0
 iw reg get 2>/dev/null | grep -q 'self-managed' && SELF_MANAGED=1
-GLOBAL="$(iw reg get 2>/dev/null | awk '/^country/{print $2; exit}')"
-PHYREG="$(iw phy "$PHY" reg get 2>/dev/null | awk '/^country/{print $2; exit}')"
+GLOBAL="$(iw reg get 2>/dev/null | awk '/^country/{print $2; exit}' | tr -d ':')"
+PHYREG="$(iw phy "$PHY" reg get 2>/dev/null | awk '/^country/{print $2; exit}' | tr -d ':')"
 echo "  global domain: ${GLOBAL:-unknown}"
 [ -n "$PHYREG" ] && echo "  card domain:   $PHYREG"
 
@@ -85,32 +85,66 @@ echo "  5 GHz:   ${CH5[*]:-none}"
 
 hdr "Channel congestion"
 BEST24=6; BEST5=""
-if ip link set "$IFACE" up 2>/dev/null && iw dev "$IFACE" scan >/tmp/udt-scan 2>/dev/null; then
+# A wedged radio can make "iw scan" block forever, so cap it. A failed scan only
+# costs us the congestion recommendation, not the setup.
+if ip link set "$IFACE" up 2>/dev/null && timeout 25 iw dev "$IFACE" scan >/tmp/udt-scan 2>/dev/null; then
   echo "  neighbours per channel:"
   grep -oE 'primary channel: [0-9]+' /tmp/udt-scan | awk '{print $3}' \
     | sort -n | uniq -c | sort -rn | head -8 | sed 's/^/    /'
-  for c in 1 6 11; do
-    n=$(grep -c "primary channel: $c\$" /tmp/udt-scan 2>/dev/null || echo 0)
-    echo "    ch $c: $n neighbours"
-  done
-  BEST24=$(for c in 1 6 11; do
-             printf '%s %s\n' "$(grep -c "primary channel: $c\$" /tmp/udt-scan 2>/dev/null||echo 0)" "$c"
-           done | sort -n | head -1 | awk '{print $2}')
+  # note: grep -c prints 0 and exits 1 on no match, so "|| echo 0" would emit two
+  count(){ grep -c "primary channel: $1\$" /tmp/udt-scan 2>/dev/null || true; }
+  for c in 1 6 11; do echo "    ch $c: $(count "$c") neighbours"; done
+  BEST24=$(for c in 1 6 11; do printf '%s %s\n' "$(count "$c")" "$c"; done \
+           | sort -n | head -1 | awk '{print $2}')
   for c in "${CH5[@]}"; do
-    n=$(grep -c "primary channel: $c\$" /tmp/udt-scan 2>/dev/null || echo 0)
     [ -z "$BEST5" ] && BEST5="$c"
-    [ "$n" = "0" ] && { BEST5="$c"; break; }
+    [ "$(count "$c")" = "0" ] && { BEST5="$c"; break; }
   done
   rm -f /tmp/udt-scan
 else
   c_y "  scan failed (interface busy?); defaulting to 2.4 GHz ch 6"
 fi
 
-if [ "${#CH5[@]}" -gt 0 ] && [ -n "$BEST5" ]; then
-  HW=a; CHAN="$BEST5"; c_g "recommending 5 GHz channel $CHAN"
+# `iw phy info` happily lists channels the kernel will then refuse to beacon on
+# -- self-managed regulatory domains and IR-CONCURRENT are the usual reasons.
+# The only trustworthy test is to actually start hostapd, so that is what we do.
+probe() { # $1=hw_mode $2=channel -> 0 if hostapd reaches AP-ENABLED
+  cfg=/tmp/udt-probe.conf; log=/tmp/udt-probe.log
+  printf 'interface=%s\ndriver=nl80211\nssid=udt-probe\nhw_mode=%s\nchannel=%s\nieee80211n=1\n' \
+    "$IFACE" "$1" "$2" > "$cfg"
+  ip link set "$IFACE" down 2>/dev/null
+  iw dev "$IFACE" set type managed 2>/dev/null
+  ip link set "$IFACE" up 2>/dev/null
+  timeout 9 hostapd "$cfg" > "$log" 2>&1 &
+  pp=$!
+  sleep 6
+  grep -q "AP-ENABLED" "$log"; r=$?
+  kill "$pp" 2>/dev/null; wait "$pp" 2>/dev/null || true
+  rm -f "$cfg"
+  return $r
+}
+
+HW=g; CHAN="${BEST24:-6}"
+hdr "Verifying the channel actually works"
+if command -v hostapd >/dev/null 2>&1; then
+  if [ -n "$BEST5" ] && probe a "$BEST5"; then
+    HW=a; CHAN="$BEST5"
+    c_g "5 GHz channel $BEST5 confirmed: hostapd reached AP-ENABLED"
+  else
+    [ -n "$BEST5" ] && c_y "5 GHz ch $BEST5 is advertised as usable but hostapd refused it
+  (this is the self-managed regulatory trap; falling back to 2.4 GHz)"
+    if probe g "${BEST24:-6}"; then
+      c_g "2.4 GHz channel ${BEST24:-6} confirmed: hostapd reached AP-ENABLED"
+    else
+      c_r "hostapd could not start on 2.4 GHz either. See /tmp/udt-probe.log"
+    fi
+  fi
 else
-  HW=g; CHAN="${BEST24:-6}"; c_g "recommending 2.4 GHz channel $CHAN"
+  c_y "hostapd is not installed yet, so the channel choice is unverified.
+  Install it and re-run, or expect the first start to tell you."
 fi
+BAND="2.4 GHz"; [ "$HW" = a ] && BAND="5 GHz"
+c_g "selected: $BAND channel $CHAN"
 
 # --------------------------------------------------------------- uplink -----
 hdr "Uplink and addressing"

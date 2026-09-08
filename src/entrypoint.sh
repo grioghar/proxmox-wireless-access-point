@@ -52,6 +52,12 @@ echo "[udt] applying firewall + shaping"
 echo "[udt] starting dnsmasq / flipproxy / squid / portal"
 dnsmasq -k -C /etc/dnsmasq-udt.conf & pids+=($!)
 [ "${UDT_FLIP:-1}" = "1" ] && { python3 /opt/udt/flipproxy.py & pids+=($!); }
+# A distro squid may already be running (Debian starts it on install) or may
+# have left a stale pid file; either makes ours abort with "already running".
+systemctl stop squid 2>/dev/null || true
+pkill -x squid 2>/dev/null || true
+rm -f /var/run/squid.pid
+sleep 1
 squid -N -f /etc/squid/squid.conf & pids+=($!)
 python3 /opt/udt/portal.py & pids+=($!)
 

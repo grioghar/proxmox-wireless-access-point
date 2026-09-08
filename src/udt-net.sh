@@ -95,10 +95,12 @@ shape() {
   tc qdisc del dev "$IF" root    2>/dev/null
   tc qdisc del dev "$IF" ingress 2>/dev/null
   tc qdisc add dev "$IF" root handle 1: htb default 10
-  tc class add dev "$IF" parent 1:  classid 1:1  htb rate "$R_TRUSTED" ceil "$R_TRUSTED"
-  tc class add dev "$IF" parent 1:1 classid 1:10 htb rate "$R_GUEST"    ceil "$R_GUEST"    burst 4k
-  tc class add dev "$IF" parent 1:1 classid 1:20 htb rate "$R_STANDARD" ceil "$R_STANDARD" burst 8k
-  tc class add dev "$IF" parent 1:1 classid 1:30 htb rate "$R_TRUSTED"  ceil "$R_TRUSTED"  burst 32k
+  # explicit quantum: without it HTB derives one from the rate and warns
+  # "quantum of class ... is big" on the high-rate classes.
+  tc class add dev "$IF" parent 1:  classid 1:1  htb rate "$R_TRUSTED" ceil "$R_TRUSTED" quantum 1514
+  tc class add dev "$IF" parent 1:1 classid 1:10 htb rate "$R_GUEST"    ceil "$R_GUEST"    burst 4k  quantum 1514
+  tc class add dev "$IF" parent 1:1 classid 1:20 htb rate "$R_STANDARD" ceil "$R_STANDARD" burst 8k  quantum 1514
+  tc class add dev "$IF" parent 1:1 classid 1:30 htb rate "$R_TRUSTED"  ceil "$R_TRUSTED"  burst 32k quantum 1514
   for c in 10 20 30; do
     tc qdisc add dev "$IF" parent 1:$c handle ${c}: sfq perturb 10 2>/dev/null
   done

@@ -45,16 +45,22 @@ echo "==> container id: $CTID"
 pct status "$CTID" >/dev/null 2>&1 && die "CT $CTID already exists; set CTID=<free id>"
 
 # ---- template ---------------------------------------------------------------
-TMPL=$(pveam available 2>/dev/null | awk '/debian-13-standard/{print $2}' | sort -r | head -1)
-[ -n "$TMPL" ] || TMPL=$(pveam available 2>/dev/null | awk '/debian-12-standard/{print $2}' | sort -r | head -1)
-[ -n "$TMPL" ] || die "no Debian template available; run: pveam update"
-if ! pveam list "$TEMPLATE_STORE" 2>/dev/null | grep -q "$TMPL"; then
+# Prefer a template that is already downloaded; only reach for the network if
+# the host has none.
+TMPL_VOLID=$(pveam list "$TEMPLATE_STORE" 2>/dev/null \
+             | awk '/debian-1[0-9]-standard/{print $1}' | sort -r | head -1)
+if [ -z "$TMPL_VOLID" ]; then
+  TMPL=$(pveam available 2>/dev/null | awk '/debian-13-standard/{print $2}' | sort -r | head -1)
+  [ -n "$TMPL" ] || TMPL=$(pveam available 2>/dev/null | awk '/debian-12-standard/{print $2}' | sort -r | head -1)
+  [ -n "$TMPL" ] || die "no Debian template available locally or upstream; run: pveam update"
   echo "==> downloading template $TMPL"
   pveam download "$TEMPLATE_STORE" "$TMPL"
+  TMPL_VOLID="${TEMPLATE_STORE}:vztmpl/${TMPL}"
 fi
+echo "==> template: $TMPL_VOLID"
 
 echo "==> creating privileged CT $CTID"
-pct create "$CTID" "${TEMPLATE_STORE}:vztmpl/${TMPL}" \
+pct create "$CTID" "$TMPL_VOLID" \
   --hostname "$HOSTNAME_" --cores 2 --memory "$MEMORY" --swap 256 \
   --rootfs "${STORAGE}:${DISK}" --unprivileged 0 --onboot 1 \
   --net0 "name=eth0,bridge=${BRIDGE},ip=dhcp" \

@@ -8,12 +8,24 @@ and origin-form requests (transparent interception), so it works either way.
 Only cleartext HTTP is touched. HTTPS is never intercepted or decrypted -- doing
 so would require planting a CA on every client, which this project refuses to do.
 """
-import http.server, ipaddress, os, socket, subprocess, urllib.error, urllib.request
+import http.server, ipaddress, os, shutil, socket, subprocess, urllib.error, urllib.request
 
 LISTEN = ("127.0.0.1", int(os.environ.get("UDT_FLIP_PORT", "3129")))
 TIMEOUT = 20
 MAXBYTES = 4 * 1024 * 1024
-MAGICK = os.environ.get("UDT_MAGICK", "/usr/bin/magick")
+
+
+def _find_magick():
+    """ImageMagick 7 (Debian 13+) ships 'magick'; ImageMagick 6 (Debian 12)
+    ships only 'convert'. Both accept the same rotate invocation."""
+    for cand in (os.environ.get("UDT_MAGICK"), shutil.which("magick"),
+                 shutil.which("convert")):
+        if cand and os.path.exists(cand):
+            return cand
+    return "convert"
+
+
+MAGICK = _find_magick()
 FMT = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
        "image/gif": "gif", "image/bmp": "bmp", "image/webp": "webp"}
 HOP = {"connection", "proxy-connection", "keep-alive", "transfer-encoding",

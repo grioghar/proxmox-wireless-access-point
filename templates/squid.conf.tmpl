@@ -7,6 +7,12 @@
 # deliberate. Domain-level attribution is the goal; interception of content is
 # not, and would put every client's credentials at risk.
 
+# Squid needs at least one NON-intercept port or it cannot construct its own
+# internal URLs and dies with "mimeLoadIcon: cannot parse internal URL ...:0".
+# This one is loopback-only and never reachable by clients.
+http_port 127.0.0.1:3131
+visible_hostname upside-down-ternet
+
 http_port 3128 intercept
 https_port 3130 intercept ssl-bump generate-host-certificates=off \
     tls-cert=/etc/squid/dummy.pem
