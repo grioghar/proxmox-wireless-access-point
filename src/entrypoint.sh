@@ -20,6 +20,37 @@ if [ -n "${UDT_PASSPHRASE:-}" ]; then
   { echo "wpa=2"; echo "wpa_key_mgmt=WPA-PSK"; echo "rsn_pairwise=CCMP"
     echo "wpa_passphrase=${UDT_PASSPHRASE}"; } >> /etc/hostapd.conf
 fi
+# ---- minimum client capability --------------------------------------------
+# One 802.11b client associating drags the whole cell down: it occupies far more
+# airtime per byte and forces protection modes on everyone else. Dropping the
+# DSSS rates makes b-only devices unable to associate at all.
+case "${UDT_MIN_RATE:-any}" in
+  g|ofdm)
+    { echo "supported_rates=60 90 120 180 240 360 480 540"
+      echo "basic_rates=60 120 240"; } >> /etc/hostapd.conf
+    echo "[udt] minimum client: 802.11g (OFDM only, 6 Mbps floor; 802.11b refused)"
+    ;;
+  n|ht)
+    { echo "supported_rates=60 90 120 180 240 360 480 540"
+      echo "basic_rates=60 120 240"
+      echo "require_ht=1"; } >> /etc/hostapd.conf
+    echo "[udt] minimum client: 802.11n (HT required)"
+    ;;
+  ac|vht)
+    if [ "${UDT_HW_MODE}" != "a" ]; then
+      echo "[udt] WARNING: UDT_MIN_RATE=ac needs 5 GHz (UDT_HW_MODE=a); using 802.11n instead" >&2
+      { echo "supported_rates=60 90 120 180 240 360 480 540"
+        echo "basic_rates=60 120 240"; echo "require_ht=1"; } >> /etc/hostapd.conf
+    else
+      { echo "require_ht=1"; echo "require_vht=1"; } >> /etc/hostapd.conf
+      echo "[udt] minimum client: 802.11ac (VHT required)"
+    fi
+    ;;
+  *)
+    echo "[udt] minimum client: none (802.11b devices may associate)"
+    ;;
+esac
+
 # ---- lab mode: WPA2 + MAC allowlist ---------------------------------------
 if [ "${UDT_MODE:-public}" = "lab" ]; then
   if [ -z "${UDT_PASSPHRASE:-}" ]; then

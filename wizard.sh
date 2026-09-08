@@ -181,6 +181,16 @@ read -rp "Retain consent records for how many days? [30]: " RET; RET="${RET:-30}
 read -rp "Flip images on cleartext HTTP? [Y/n]: " FL
 FLIP=1; case "${FL:-y}" in [Nn]*) FLIP=0 ;; esac
 
+echo
+echo "  Minimum client capability. One 802.11b device drags the whole cell down,"
+echo "  so refusing them is usually right unless you are deliberately testing."
+echo "    any = allow everything (802.11b included)"
+echo "    g   = OFDM only, 6 Mbps floor  (recommended)"
+echo "    n   = require 802.11n"
+echo "    ac  = require 802.11ac (5 GHz only)"
+read -rp "Minimum [g]: " MR; MINRATE="${MR:-g}"
+case "$MINRATE" in any|g|n|ac) ;; *) c_y "  unrecognised, using g"; MINRATE=g ;; esac
+
 hdr "Posture"
 echo "  public : open network, the captive portal is the only gate"
 echo "  lab    : WPA2 required, optional MAC allowlist -- private to you"
@@ -259,6 +269,7 @@ UDT_RATE_STANDARD=$RS
 UDT_RATE_TRUSTED=$RT
 
 UDT_FLIP=$FLIP
+UDT_MIN_RATE=$MINRATE
 UDT_RETENTION_DAYS=$RET
 UDT_DNS1=1.1.1.1
 UDT_DNS2=8.8.8.8

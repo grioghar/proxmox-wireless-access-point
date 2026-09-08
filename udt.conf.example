@@ -83,3 +83,8 @@ UDT_MONITOR_TLS_KEY=
 # serve just loops the browser.
 UDT_MONITOR_REDIRECT=0
 UDT_MONITOR_REDIRECT_PORT=80
+
+# Minimum client capability. An 802.11b device occupies far more airtime per byte
+# and forces protection modes on everyone else, so one of them can halve the
+# cell. any|g|n|ac -- 'g' drops the DSSS rates so b-only devices cannot associate.
+UDT_MIN_RATE=g

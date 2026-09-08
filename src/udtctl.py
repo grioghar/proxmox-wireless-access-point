@@ -139,6 +139,8 @@ CONFIG_KEYS = {
     "UDT_RATE_STANDARD":   (_rate, False, "standard tier cap"),
     "UDT_RATE_TRUSTED":    (_rate, False, "trusted tier cap"),
     "UDT_FLIP":            (lambda v: v in BOOL, True,  "flip images on HTTP"),
+    "UDT_MIN_RATE":        (lambda v: v in ("any", "g", "ofdm", "n", "ht", "ac", "vht"),
+                            True, "minimum client: any|g|n|ac (refuses slower devices)"),
     "UDT_RETENTION_DAYS":  (_int(0, 3650), False, "consent record retention"),
     "UDT_MITM":            (lambda v: v in BOOL, True,  "enable TLS interception"),
     "UDT_MITM_AUTO":       (lambda v: v in BOOL, True,

@@ -64,9 +64,43 @@ button.tg.on{background:#1f6feb;border-color:#1f6feb;color:#fff}
 #log .v{color:#6e7681;text-align:right}
 #log .vmitm{color:#ff9d95}
 #log .none{color:#6e7681;padding:22px 12px;text-align:center}
+.chwrap{position:relative;display:inline-block}
+#chnow{border-bottom:1px dashed #6e7681;cursor:help}
+#chpop{display:none;position:absolute;top:135%;left:0;z-index:60;background:#161b22;
+  border:1px solid #30363d;border-radius:10px;padding:13px 15px;min-width:400px;
+  box-shadow:0 10px 34px rgba(0,0,0,.65);font-weight:400}
+.chwrap:hover #chpop,#chpop:hover{display:block}
+#chpop h3{margin:0 0 9px;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:#8b949e;font-weight:500}
+#chpop table{font-size:12px}
+#chpop th{padding:4px 7px;font-size:10px}
+#chpop td{padding:4px 7px;border-bottom:1px solid #21262d;white-space:nowrap}
+#chpop tr.cur td{background:#0f2e17}
+#chpop .q{display:inline-block;width:46px;height:5px;background:#21262d;border-radius:3px;overflow:hidden;vertical-align:middle}
+#chpop .q i{display:block;height:100%;background:#238636}
+#chpop .q i.mid{background:#d29922}#chpop .q i.low{background:#f85149}
+.chsw{display:flex;gap:8px;align-items:center;margin-top:11px;padding-top:10px;border-top:1px solid #30363d}
+.chsw select{flex:1}
+#chmsg{font-size:12px;margin-top:8px;color:#8b949e}
+#chmsg.ok{color:#7ee787}#chmsg.bad{color:#ff9d95}
+#chnote{font-size:11px;color:#6e7681;margin-top:7px;line-height:1.4}
 </style></head><body><div class="wrap">
 <header>
-  <h1>__SSID__ <small>ch __CHANNEL__ · __IFACE__</small></h1>
+  <h1>__SSID__ <small><span class="chwrap"><span id="chnow">ch __CHANNEL__</span>
+    <div id="chpop">
+      <h3>channel conditions</h3>
+      <table><thead><tr><th>ch</th><th>band</th><th>APs</th><th>strongest</th>
+        <th>noise</th><th>quality</th></tr></thead>
+        <tbody id="chrows"><tr><td colspan="6">scanning…</td></tr></tbody></table>
+      <div class="chsw">
+        <select id="chsel"></select>
+        <button class="tg" id="chgo">switch</button>
+        <button class="tg" id="chrescan">rescan</button>
+      </div>
+      <div id="chmsg"></div>
+      <div id="chnote">Switching uses 802.11h CSA, so associated clients follow
+        without dropping. Scanning borrows a second virtual interface; the AP
+        stays up but clients may see a brief latency blip.</div>
+    </div></span> · __IFACE__</small></h1>
   <div class="controls">
     <span id="dot"></span><span id="age">—</span>
     <label>refresh
@@ -298,6 +332,60 @@ function scheduleReq(){
 }
 var _sched=schedule;
 schedule=function(){ _sched(); scheduleReq(); };
+
+/* ---- channel conditions + live switching -------------------------------- */
+var CHROWS=document.getElementById("chrows"), CHSEL=document.getElementById("chsel"),
+    CHGO=document.getElementById("chgo"), CHRE=document.getElementById("chrescan"),
+    CHMSG=document.getElementById("chmsg"), CHNOW=document.getElementById("chnow");
+var chLoaded=false;
+
+function renderChannels(d){
+  var rows=[], opts=[];
+  d.channels.forEach(function(c){
+    var q=Math.max(0,Math.min(100,c.score||0));
+    var cls=q>60?"":(q>30?"mid":"low");
+    rows.push('<tr class="'+(c.current?"cur":"")+'">'+
+      '<td>'+c.channel+(c.current?" ●":"")+'</td>'+
+      '<td>'+c.band+'</td>'+
+      '<td>'+c.neighbours+'</td>'+
+      '<td>'+(c.strongest===null?"—":c.strongest+" dBm")+'</td>'+
+      '<td>'+(c.noise===null?"—":c.noise+" dBm")+'</td>'+
+      '<td><span class="q"><i class="'+cls+'" style="width:'+q+'%"></i></span></td></tr>');
+    opts.push('<option value="'+c.channel+'"'+(c.current?" selected":"")+'>ch '+
+              c.channel+' ('+c.band+' GHz, '+c.neighbours+' APs)</option>');
+  });
+  CHROWS.innerHTML=rows.length?rows.join(""):'<tr><td colspan="6">no usable channels</td></tr>';
+  if(!chLoaded){ CHSEL.innerHTML=opts.join(""); chLoaded=true; }
+  if(d.current) CHNOW.textContent="ch "+d.current;
+  if(!d.noise_available){
+    document.getElementById("chnote").innerHTML=
+      "This driver reports no noise floor, so quality is derived from neighbour "+
+      "count and their strength rather than true SNR. Switching uses 802.11h CSA, "+
+      "so clients follow without dropping.";
+  }
+}
+function loadChannels(force){
+  CHMSG.textContent=force?"scanning…":""; CHMSG.className="";
+  fetch("/api/channels"+(force?"?force=1":""),{cache:"no-store"})
+   .then(function(r){return r.json()})
+   .then(function(d){ renderChannels(d); if(force){CHMSG.textContent="scan complete";CHMSG.className="ok";} })
+   .catch(function(e){ CHMSG.textContent="channel scan failed"; CHMSG.className="bad"; });
+}
+CHRE.onclick=function(){ chLoaded=false; loadChannels(true); };
+CHGO.onclick=function(){
+  var ch=CHSEL.value;
+  CHMSG.textContent="switching to channel "+ch+"…"; CHMSG.className="";
+  fetch("/api/channel",{method:"POST",headers:{"Content-Type":"application/json"},
+                        body:JSON.stringify({channel:parseInt(ch,10)})})
+   .then(function(r){return r.json()})
+   .then(function(d){
+      CHMSG.textContent=d.msg; CHMSG.className=d.ok?"ok":"bad";
+      if(d.ok){ chLoaded=false; setTimeout(function(){loadChannels(false);},1500); }
+   })
+   .catch(function(){ CHMSG.textContent="switch request failed"; CHMSG.className="bad"; });
+};
+loadChannels(false);
+setInterval(function(){ loadChannels(false); }, 120000);
 
 poll(); pollRequests(); schedule();
 </script></body></html>

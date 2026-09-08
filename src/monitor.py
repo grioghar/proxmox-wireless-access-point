@@ -210,6 +210,184 @@ def snapshot():
 MITM_LOG = "/var/lib/udt/mitm-requests.log"
 TEMPLATE = "/opt/udt/templates/monitor.html"
 
+# ---- channel intelligence ---------------------------------------------------
+# The AP interface itself cannot scan ("Operation not supported") and its survey
+# dump is empty, so we borrow a second managed vif on the same phy. Scanning from
+# it takes the radio off-channel in slices, which clients ride out -- the AP stays
+# ENABLED throughout. Results are cached because it is not free.
+SCAN_VIF = "udtscan0"
+CHAN_TTL = 60
+_chan_cache = {"ts": 0.0, "data": None}
+
+
+def _phy():
+    out = sh(["iw", "dev", IFACE, "info"])
+    m = re.search(r"wiphy (\d+)", out)
+    return "phy%s" % m.group(1) if m else "phy0"
+
+
+def chan_to_freq(ch):
+    ch = int(ch)
+    if ch == 14:
+        return 2484
+    if ch <= 13:
+        return 2412 + (ch - 1) * 5
+    return 5000 + ch * 5
+
+
+def freq_to_chan(f):
+    f = int(f)
+    if f == 2484:
+        return 14
+    if f < 2500:
+        return (f - 2412) // 5 + 1
+    return (f - 5000) // 5
+
+
+def usable_channels():
+    """Channels this radio may legally beacon on, per the live regulatory state."""
+    out, cur = [], None
+    for line in sh(["iw", "phy", _phy(), "info"]).splitlines():
+        m = re.match(r"\s+\* (\d+)(?:\.\d+)? MHz \[(\d+)\] \(([^)]*)\)", line)
+        if not m:
+            continue
+        freq, ch, flags = int(m.group(1)), int(m.group(2)), m.group(3)
+        if "disabled" in flags or "no IR" in flags:
+            continue
+        out.append({"channel": ch, "freq": freq,
+                    "band": "2.4" if freq < 2500 else "5",
+                    "radar": "radar" in flags})
+    return out
+
+
+def _ensure_scan_vif():
+    if sh(["ip", "link", "show", SCAN_VIF]).strip():
+        return True, False           # exists already, not ours to remove
+    r = subprocess.run(["iw", "dev", IFACE, "interface", "add", SCAN_VIF,
+                        "type", "managed"], capture_output=True, text=True)
+    if r.returncode != 0:
+        return False, False
+    subprocess.run(["ip", "link", "set", SCAN_VIF, "up"], capture_output=True)
+    time.sleep(1)
+    return True, True                # we created it, so we clean it up
+
+
+def channel_report(force=False):
+    now = time.time()
+    if not force and _chan_cache["data"] and now - _chan_cache["ts"] < CHAN_TTL:
+        return _chan_cache["data"]
+
+    chans = {c["channel"]: dict(c, neighbours=0, strongest=None, noise=None)
+             for c in usable_channels()}
+    ok, ours = _ensure_scan_vif()
+    if ok:
+        # two passes: the first often returns nothing while the vif settles
+        raw = sh(["iw", "dev", SCAN_VIF, "scan"], timeout=30)
+        if raw.count("BSS ") < 2:
+            raw = sh(["iw", "dev", SCAN_VIF, "scan"], timeout=30)
+        sig = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.startswith("signal:"):
+                try:
+                    sig = float(line.split()[1])
+                except (ValueError, IndexError):
+                    sig = None
+            m = re.match(r"\* primary channel: (\d+)", line) or \
+                re.match(r"DS Parameter set: channel (\d+)", line)
+            if m:
+                ch = int(m.group(1))
+                if ch in chans:
+                    chans[ch]["neighbours"] += 1
+                    if sig is not None and (chans[ch]["strongest"] is None
+                                            or sig > chans[ch]["strongest"]):
+                        chans[ch]["strongest"] = sig
+        # noise floor, when the driver bothers to report it
+        for block in sh(["iw", "dev", SCAN_VIF, "survey", "dump"]).split("Survey data"):
+            fm = re.search(r"frequency:\s+(\d+) MHz", block)
+            nm = re.search(r"noise:\s+(-?\d+) dBm", block)
+            if fm and nm:
+                ch = freq_to_chan(fm.group(1))
+                if ch in chans:
+                    chans[ch]["noise"] = int(nm.group(1))
+        if ours:
+            subprocess.run(["iw", "dev", SCAN_VIF, "del"], capture_output=True)
+
+    cur = None
+    st = sh(["hostapd_cli", "-p", "/var/run/hostapd", "-i", IFACE, "status"])
+    m = re.search(r"^channel=(\d+)", st, re.M)
+    if m:
+        cur = int(m.group(1))
+
+    rows = sorted(chans.values(), key=lambda c: (c["band"], c["channel"]))
+    for c in rows:
+        c["current"] = (c["channel"] == cur)
+        # crude but honest: fewer, weaker neighbours is better
+        s = c["strongest"]
+        c["score"] = round(max(0.0, 100.0 - c["neighbours"] * 12.0
+                               - (0 if s is None else max(0.0, (s + 100.0)) * 0.8)), 1)
+    data = {"ts": now, "current": cur, "channels": rows,
+            "noise_available": any(c["noise"] is not None for c in rows)}
+    _chan_cache.update(ts=now, data=data)
+    return data
+
+
+def switch_channel(ch):
+    """802.11h CSA: clients follow us to the new channel without disconnecting."""
+    try:
+        ch = int(ch)
+    except (TypeError, ValueError):
+        return False, "not a channel number"
+    allowed = {c["channel"] for c in usable_channels()}
+    if ch not in allowed:
+        return False, ("channel %d is not permitted for AP mode in the current "
+                       "regulatory state" % ch)
+    freq = chan_to_freq(ch)
+
+    # hostapd's CSA cannot change hw_mode, so a 2.4<->5 GHz move is not a channel
+    # switch at all. Attempting one reports success and strands the AP on a
+    # channel it may not even be able to beacon on, with no way back. Refuse.
+    st = sh(["hostapd_cli", "-p", "/var/run/hostapd", "-i", IFACE, "status"])
+    m = re.search(r"^freq=(\d+)", st, re.M)
+    cur_freq = int(m.group(1)) if m else None
+    if cur_freq and ((cur_freq < 2500) != (freq < 2500)):
+        return False, ("cannot switch between bands live: hostapd's CSA cannot "
+                       "change hw_mode. Set UDT_HW_MODE=%s and UDT_CHANNEL=%d, "
+                       "then restart the service."
+                       % ("g" if freq < 2500 else "a", ch))
+
+    r = subprocess.run(["hostapd_cli", "-p", "/var/run/hostapd", "-i", IFACE,
+                        "chan_switch", "10", str(freq)],
+                       capture_output=True, text=True, timeout=20)
+    out = (r.stdout + r.stderr).strip()
+    if r.returncode != 0 or "FAIL" in out.upper():
+        return False, out or "hostapd refused the switch"
+
+    # hostapd returns OK optimistically; confirm the radio actually landed there
+    # and is still beaconing before we report success or persist anything.
+    time.sleep(2.5)
+    st2 = sh(["hostapd_cli", "-p", "/var/run/hostapd", "-i", IFACE, "status"])
+    got = re.search(r"^channel=(\d+)", st2, re.M)
+    ena = "state=ENABLED" in st2
+    if not ena or not got or int(got.group(1)) != ch:
+        return False, ("hostapd accepted the switch but the radio did not land on "
+                       "channel %d (now: %s, %s). Restart the service to recover."
+                       % (ch, got.group(1) if got else "unknown",
+                          "enabled" if ena else "NOT enabled"))
+    # persist, so a restart does not undo it
+    try:
+        lines = open(CONF).read().splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith("UDT_CHANNEL="):
+                lines[i] = "UDT_CHANNEL=%d" % ch
+            elif line.startswith("UDT_HW_MODE="):
+                lines[i] = "UDT_HW_MODE=%s" % ("g" if freq < 2500 else "a")
+        open(CONF, "w").write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+    _chan_cache["ts"] = 0.0
+    return True, "switched to channel %d (%d MHz)" % (ch, freq)
+
 
 def _tail(path, nbytes=600000):
     try:
@@ -308,6 +486,8 @@ class Mon(BaseHTTPRequestHandler):
         one = lambda k, d=None: (qs.get(k, [d])[0])
         if u.path == "/api/stations":
             return self._send(json.dumps(snapshot()))
+        if u.path == "/api/channels":
+            return self._send(json.dumps(channel_report(one("force") == "1")))
         if u.path == "/api/requests":
             try:
                 since = float(one("since", "0") or 0)
@@ -330,6 +510,20 @@ class Mon(BaseHTTPRequestHandler):
                     .replace("__CHANNEL__", html.escape(str(CHANNEL)))
                     .replace("__IFACE__", html.escape(IFACE)))
         return self._send(page, "text/html; charset=utf-8")
+
+    def do_POST(self):
+        from urllib.parse import urlparse, parse_qs
+        u = urlparse(self.path)
+        if u.path != "/api/channel":
+            return self._send(json.dumps({"ok": False, "msg": "not found"}), code=404)
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        try:
+            ch = json.loads(body).get("channel")
+        except ValueError:
+            ch = parse_qs(body).get("channel", [None])[0]
+        ok, msg = switch_channel(ch)
+        return self._send(json.dumps({"ok": ok, "msg": msg}), code=200 if ok else 400)
 
 
 TLS_CERT = CFG.get("UDT_MONITOR_TLS_CERT", "")
