@@ -30,6 +30,12 @@ SSID = CFG.get("UDT_SSID", "upside-down-ternet")
 PORT = 8080
 
 MITM_ENABLED = CFG.get("UDT_MITM", "0") == "1"
+# Auto-promote: the portal silently probes the check endpoint on load. A device
+# that trusts the CA is moved to the trusted tier without anyone clicking, which
+# also authorizes it (it skips the consent form -- installing the CA on a device
+# is already a deliberate act by its owner). Devices that fail the probe notice
+# nothing and stay on the guest path.
+MITM_AUTO = CFG.get("UDT_MITM_AUTO", "0") == "1"
 MITM_HOST = CFG.get("UDT_MITM_CHECK_HOST", "mitm-check.udt")
 MITM_CPORT = CFG.get("UDT_MITM_CHECK_PORT", "8443")
 MITM_CA = os.environ.get("UDT_MITM_CA", "/var/lib/udt/mitm/mitmproxy-ca-cert.pem")
@@ -229,7 +235,32 @@ network is monitored, recorded and retained, and I consent to it.</label></div>
   }catch(e){}
   document.getElementById("fp").value=JSON.stringify(d);
 })();
-</script></body></html>"""
+</script>
+%(autoprobe)s
+</body></html>"""
+
+# Runs on page load. A TLS failure rejects the promise and we do nothing at all,
+# so a device without the certificate never sees an error or a warning.
+AUTOPROBE = """<script>
+(function(){
+  fetch("https://%(host)s:%(cport)s/check",{cache:"no-store"})
+   .then(function(r){return r.json()})
+   .then(function(){return fetch("/mitm/enable",{method:"POST"})})
+   .then(function(r){ if(!r.ok) throw 0; return r.text(); })
+   .then(function(){
+      var b=document.createElement("div");
+      b.className="card";
+      b.style.borderColor="#238636";
+      b.innerHTML="<b style='color:#7ee787'>Recognised device.</b> You have this "+
+        "network's certificate installed, so you have been moved to full speed "+
+        "&mdash; and your encrypted traffic is readable here. "+
+        "<a href='/mitm' style='color:#58a6ff'>Manage or turn this off</a>.";
+      var w=document.querySelector(".wrap"), f=document.querySelector("form");
+      if(w&&f){w.insertBefore(b,f);}
+   })
+   .catch(function(){ /* no certificate: stay a guest, silently */ });
+})();
+</script>"""
 
 DONE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Connected</title>
@@ -364,8 +395,12 @@ class Portal(BaseHTTPRequestHandler):
                         % (html.escape(k), html.escape(str(v))) for k, v in rows)
         ret = ("%d days" % RETENTION) if RETENTION > 0 else "as long as this network runs"
         err = '<div class="err">%s</div>' % html.escape(error) if error else ""
+        probe = ""
+        if MITM_ENABLED and MITM_AUTO:
+            probe = AUTOPROBE % {"host": MITM_HOST, "cport": MITM_CPORT}
         self._send(PAGE % {"ssid": html.escape(SSID), "greeting": html.escape(greet),
-                           "facts": facts, "error": err, "retention": ret})
+                           "facts": facts, "error": err, "retention": ret,
+                           "autoprobe": probe})
 
     def do_GET(self):
         p = urlparse(self.path).path
@@ -400,11 +435,16 @@ class Portal(BaseHTTPRequestHandler):
                 return self._send(
                     "Refused: this device has not proven it trusts the CA. "
                     "Install the certificate first.", 403, "text/plain")
-            subprocess.run([NETSH, "mitm-on", mac], timeout=10, capture_output=True)
-            msg = "Interception ENABLED for %s. Your HTTPS is now readable here." % mac
+            # promote/demote move both the iptables mark and the bandwidth tier,
+            # so a trusted device gets full speed and a demoted one drops back
+            # to the throttled, image-flipping guest path.
+            subprocess.run([NETSH, "promote", ip], timeout=15, capture_output=True)
+            msg = ("Interception ENABLED for %s, and this device is now on the "
+                   "trusted tier at full speed." % mac)
         else:
-            subprocess.run([NETSH, "mitm-off", mac], timeout=10, capture_output=True)
-            msg = "Interception disabled for %s." % mac
+            subprocess.run([NETSH, "demote", ip], timeout=15, capture_output=True)
+            msg = ("Interception disabled for %s. Back to the guest tier: "
+                   "throttled, spliced, images flipped." % mac)
         c = db()
         c.execute("INSERT INTO events(ts,mac,ip,kind,detail) VALUES(?,?,?,?,?)",
                   (time.strftime("%Y-%m-%dT%H:%M:%S"), mac, ip,

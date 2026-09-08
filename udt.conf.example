@@ -54,3 +54,10 @@ UDT_MITM=0
 UDT_MITM_PORT=8081
 UDT_MITM_CHECK_PORT=8443
 UDT_MITM_CHECK_HOST=mitm-check.udt
+
+# Automatic sorting. With this on, the portal silently probes each arriving
+# device: one that trusts the CA is promoted to the trusted tier (full speed,
+# traffic decrypted) with no clicks, and one that does not stays a throttled,
+# image-flipped guest and sees no error. This is what lets a single radio serve
+# both audiences at once. Requires UDT_MITM=1.
+UDT_MITM_AUTO=0

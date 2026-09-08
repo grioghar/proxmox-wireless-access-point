@@ -56,8 +56,11 @@ up() {
   ipt -t nat -N UDT_NAT
   ipt -t nat -A PREROUTING -i "$IF" -j UDT_NAT
   # TLS interception, if and only if this device is both opted in and verified
-  # as trusting the CA. Checked before the squid rule so it wins.
+  # as trusting the CA. Checked before the squid rules so it wins. Port 80 goes
+  # here too: a trusted device is being debugged, not pranked, so it should not
+  # get flipped images.
   ipt -t nat -A UDT_NAT -p tcp --dport 443 -m mark --mark 0x04/0x04 -j REDIRECT --to-ports "$MITM_PORT"
+  ipt -t nat -A UDT_NAT -p tcp --dport 80  -m mark --mark 0x04/0x04 -j REDIRECT --to-ports "$MITM_PORT"
   # authorized -> squid (logs; squid hands HTTP to the flip proxy as parent)
   ipt -t nat -A UDT_NAT -p tcp --dport 80  -m mark --mark 0x83/0x83 -j REDIRECT --to-ports $SQUID_HTTP
   ipt -t nat -A UDT_NAT -p tcp --dport 443 -m mark --mark 0x83/0x83 -j REDIRECT --to-ports $SQUID_HTTPS
@@ -171,8 +174,9 @@ down() {
 
 mark_for() { ipt -t mangle -C UDT_MARK -m mac --mac-source "$1" -j MARK --set-mark "$2" 2>/dev/null \
              || ipt -t mangle -A UDT_MARK -m mac --mac-source "$1" -j MARK --set-mark "$2"; }
-unmark()   { for m in "$MARK" "$MARK_MITM"; do
-               ipt -t mangle -D UDT_MARK -m mac --mac-source "$1" -j MARK --set-mark "$m" 2>/dev/null
+unmark()   { local _mk
+             for _mk in "$MARK" "$MARK_MITM"; do
+               ipt -t mangle -D UDT_MARK -m mac --mac-source "$1" -j MARK --set-mark "$_mk" 2>/dev/null
              done; }
 
 authorize()   { unmark "$1"; mark_for "$1" "$MARK"; }
@@ -183,10 +187,28 @@ mitm_on()     { unmark "$1"; mark_for "$1" "$MARK_MITM"; }
 mitm_off()    { unmark "$1"; mark_for "$1" "$MARK"; }
 list()        { ipt -t mangle -S UDT_MARK 2>/dev/null | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}'; }
 
+mac_of_ip() { ip neigh show "$1" 2>/dev/null | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | head -1; }
+
+# The two states a client can be moved between by IP alone. The portal and the
+# mitmproxy addon both drive these, so keep the logic in one place.
+promote() {   # trusted: intercepted, full speed
+  local mac; mac=$(mac_of_ip "$1")
+  [ -n "$mac" ] || { echo "no MAC for $1" >&2; return 1; }
+  mitm_on "$mac"; set_tier "$1" trusted
+  echo "promoted $1 ($mac): intercepted, trusted tier"
+}
+demote() {    # guest: spliced, throttled, images flipped
+  local mac; mac=$(mac_of_ip "$1")
+  [ -n "$mac" ] || { echo "no MAC for $1" >&2; return 1; }
+  mitm_off "$mac"; set_tier "$1" guest
+  echo "demoted $1 ($mac): spliced, guest tier"
+}
+
 case "${1:-up}" in
   up) up ;; down) down ;; shape) shape ;;
   authorize) authorize "$2" ;; deauthorize) deauthorize "$2" ;; list) list ;;
   mitm-on) mitm_on "$2" ;; mitm-off) mitm_off "$2" ;;
+  promote) promote "$2" ;; demote) demote "$2" ;;
   tier) set_tier "$2" "$3" ;; tiers-apply) tiers_apply ;;
   *) echo "usage: $0 up|down|shape|authorize <MAC>|deauthorize <MAC>|mitm-on <MAC>|mitm-off <MAC>|list|tier <IP> <guest|standard|trusted>|tiers-apply" >&2; exit 1 ;;
 esac

@@ -96,6 +96,7 @@ if [ "${UDT_MITM:-0}" = "1" ]; then
     mitmdump --mode transparent --showhost -q \
              --set confdir=/var/lib/udt/mitm \
              --listen-port "${UDT_MITM_PORT:-8081}" \
+             -s /opt/udt/mitm_addon.py \
              -w /var/lib/udt/mitm-flows & pids+=($!)
     python3 /opt/udt/mitm.py check-server & pids+=($!)
     echo "[udt] TLS interception ARMED (opt-in, cert-gated). CA: http://${UDT_GW}:8080/ca.crt"
