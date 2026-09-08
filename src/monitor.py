@@ -332,13 +332,82 @@ class Mon(BaseHTTPRequestHandler):
         return self._send(page, "text/html; charset=utf-8")
 
 
+TLS_CERT = CFG.get("UDT_MONITOR_TLS_CERT", "")
+TLS_KEY = CFG.get("UDT_MONITOR_TLS_KEY", "")
+HOSTNAME = CFG.get("UDT_MONITOR_HOSTNAME", "")
+REDIRECT = CFG.get("UDT_MONITOR_REDIRECT", "0") == "1"
+REDIRECT_PORT = int(CFG.get("UDT_MONITOR_REDIRECT_PORT", "80") or 80)
+
+
+class Redirect(BaseHTTPRequestHandler):
+    """Plain-HTTP listener that sends everyone to the HTTPS dashboard."""
+    protocol_version = "HTTP/1.1"
+    server_version = "udt-monitor"
+    sys_version = ""
+
+    def log_message(self, *a):
+        pass
+
+    def _go(self):
+        host = HOSTNAME or self.headers.get("Host", "").split(":")[0] or uplink_ip()
+        port = "" if PORT == 443 else ":%d" % PORT
+        self.send_response(301)
+        self.send_header("Location", "https://%s%s%s" % (host, port, self.path))
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    do_GET = do_HEAD = do_POST = _go
+
+
+def start_redirect(bind):
+    import threading
+    try:
+        srv = ThreadingHTTPServer((bind, REDIRECT_PORT), Redirect)
+    except OSError as e:
+        print("[udt] WARNING: redirect listener on %s:%d failed (%s)"
+              % (bind, REDIRECT_PORT, e), flush=True)
+        return
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    print("[udt] redirecting http://%s:%d/ -> https://%s:%d/"
+          % (bind, REDIRECT_PORT, HOSTNAME or bind, PORT), flush=True)
+
+
 def main():
     bind = uplink_ip()
     ThreadingHTTPServer.daemon_threads = True
     ThreadingHTTPServer.allow_reuse_address = True
     srv = ThreadingHTTPServer((bind, PORT), Mon)
-    print("[udt] monitor on http://%s:%d/ (uplink only, not reachable from %s)"
-          % (bind, PORT, IFACE), flush=True)
+
+    scheme = "http"
+    if TLS_CERT and TLS_KEY:
+        if not (os.path.exists(TLS_CERT) and os.path.exists(TLS_KEY)):
+            print("[udt] WARNING: UDT_MONITOR_TLS_CERT/KEY set but missing on disk; "
+                  "serving plain HTTP", flush=True)
+        else:
+            try:
+                import ssl
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+                srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+                scheme = "https"
+            except Exception as e:
+                print("[udt] WARNING: could not enable TLS (%s); serving plain HTTP"
+                      % e, flush=True)
+
+    where = HOSTNAME or bind
+    print("[udt] monitor on %s://%s:%d/ (uplink only, not reachable from %s)"
+          % (scheme, where, PORT, IFACE), flush=True)
+    # Only meaningful once TLS is actually on; redirecting to a scheme we do not
+    # serve would just loop the browser.
+    if REDIRECT and scheme == "https":
+        start_redirect(bind)
+    elif REDIRECT:
+        print("[udt] WARNING: UDT_MONITOR_REDIRECT is on but TLS is not; "
+              "not starting a redirect that would loop", flush=True)
     srv.serve_forever()
 
 

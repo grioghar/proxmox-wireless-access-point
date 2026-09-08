@@ -214,8 +214,29 @@ echo "  uplink address only -- devices on the AP can never reach it."
 read -rp "Enable the dashboard? [Y/n]: " MO
 MON=1; case "${MO:-y}" in [Nn]*) MON=0 ;; esac
 MONPORT=8090
+MONHOST=""; MONCERT=""; MONKEY=""; MONRED=0; MONREDPORT=80
 if [ "$MON" = 1 ]; then
   read -rp "  Dashboard port [8090]: " a; MONPORT="${a:-8090}"
+  echo "  Serve it over HTTPS with your own certificate? You will need a cert"
+  echo "  valid for the hostname, and a DNS record pointing that name at this"
+  echo "  host's uplink address."
+  read -rp "  Enable HTTPS? [y/N]: " TL
+  case "${TL:-n}" in [Yy]*)
+    read -rp "    Hostname on the certificate: " MONHOST
+    read -rp "    Path to fullchain PEM: " MONCERT
+    read -rp "    Path to private key PEM: " MONKEY
+    for f in "$MONCERT" "$MONKEY"; do
+      [ -n "$f" ] && [ ! -r "$f" ] && c_y "    warning: $f is not readable yet"
+    done
+    if [ -n "$MONKEY" ] && [ -r "$MONKEY" ]; then
+      openssl x509 -noout -in "$MONCERT" >/dev/null 2>&1 \
+        && c_g "    certificate parses" || c_y "    warning: $MONCERT did not parse"
+    fi
+    read -rp "    Also listen on plain HTTP and redirect to HTTPS? [Y/n]: " RD
+    case "${RD:-y}" in [Nn]*) MONRED=0 ;; *) MONRED=1 ;; esac
+    [ "$MONRED" = 1 ] && { read -rp "      Redirect listener port [80]: " a
+                           MONREDPORT="${a:-80}"; }
+  ;; esac
 fi
 
 cat > "$OUT" <<CONF
@@ -254,6 +275,11 @@ UDT_MITM_CHECK_HOST=mitm-check.udt
 UDT_MONITOR=$MON
 UDT_MONITOR_PORT=$MONPORT
 UDT_MONITOR_BIND=
+UDT_MONITOR_HOSTNAME=$MONHOST
+UDT_MONITOR_TLS_CERT=$MONCERT
+UDT_MONITOR_TLS_KEY=$MONKEY
+UDT_MONITOR_REDIRECT=$MONRED
+UDT_MONITOR_REDIRECT_PORT=$MONREDPORT
 CONF
 chmod 600 "$OUT"
 

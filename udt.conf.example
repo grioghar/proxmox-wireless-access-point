@@ -70,3 +70,16 @@ UDT_MONITOR=1
 UDT_MONITOR_PORT=8090
 # Leave blank to auto-detect the uplink IP. Never set this to 0.0.0.0.
 UDT_MONITOR_BIND=
+
+# Serve the dashboard over HTTPS with your own certificate. Leave blank for
+# plain HTTP. Point these at a cert valid for UDT_MONITOR_HOSTNAME, and add a
+# DNS record for that name pointing at this host's uplink address.
+UDT_MONITOR_HOSTNAME=
+UDT_MONITOR_TLS_CERT=
+UDT_MONITOR_TLS_KEY=
+
+# Listen on plain HTTP and 301 everyone to the HTTPS dashboard. Ignored unless
+# UDT_MONITOR_TLS_CERT/KEY are set, since redirecting to a scheme you do not
+# serve just loops the browser.
+UDT_MONITOR_REDIRECT=0
+UDT_MONITOR_REDIRECT_PORT=80
