@@ -38,6 +38,8 @@ flush_chains() {
   ipt -t nat -F UDT_NAT 2>/dev/null; ipt -t nat -X UDT_NAT 2>/dev/null
   ipt -D FORWARD -j UDT_FWD 2>/dev/null
   ipt -F UDT_FWD 2>/dev/null; ipt -X UDT_FWD 2>/dev/null
+  ipt -D INPUT -j UDT_IN 2>/dev/null
+  ipt -F UDT_IN 2>/dev/null; ipt -X UDT_IN 2>/dev/null
   ipt -t nat -D POSTROUTING -s "$NET" -o "$UPLINK" -j MASQUERADE 2>/dev/null
 }
 
@@ -67,6 +69,13 @@ up() {
   # unauthorized -> captive portal (HTTP only; 443 is dropped so OS probes fire)
   ipt -t nat -A UDT_NAT -p tcp --dport 80 -j REDIRECT --to-ports $PORTAL_PORT
   ipt -t nat -A POSTROUTING -s "$NET" -o "$UPLINK" -j MASQUERADE
+
+  # ---- INPUT: keep AP clients away from operator surfaces --------------------
+  # The monitor shows names, emails and browsing history. It binds to the uplink
+  # address only; this is the belt to that suspenders.
+  ipt -N UDT_IN
+  ipt -I INPUT -j UDT_IN
+  ipt -A UDT_IN -i "$IF" -p tcp --dport "${UDT_MONITOR_PORT:-8090}" -j DROP
 
   # ---- FORWARD: default deny ------------------------------------------------
   ipt -N UDT_FWD

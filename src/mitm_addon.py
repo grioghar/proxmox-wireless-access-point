@@ -12,6 +12,7 @@ worst case is one failed connection rather than a device with no working interne
 import subprocess, time
 
 NETSH = "/opt/udt/udt-net.sh"
+REQLOG = "/var/lib/udt/mitm-requests.log"
 DEBOUNCE = 30.0          # seconds between demotions for the same client
 _last = {}
 
@@ -57,6 +58,32 @@ class CertGate:
         ip = _peer(data)
         if ip:
             _last.pop(ip, None)
+
+    # Squid never sees an intercepted client's traffic, so the operator log for
+    # those devices has to come from here. One tab-separated line per response,
+    # same shape the monitor parses out of squid's access.log.
+    def response(self, flow):
+        try:
+            r, req = flow.response, flow.request
+            ip = flow.client_conn.peername[0]
+            line = "%.3f\t%s\t%s\t%s\t%d\t%d\tmitm\n" % (
+                time.time(), ip, req.method,
+                req.pretty_url[:400], r.status_code,
+                len(r.raw_content or b""))
+            with open(REQLOG, "a") as fh:
+                fh.write(line)
+        except Exception:
+            pass
+
+    def error(self, flow):
+        try:
+            ip = flow.client_conn.peername[0]
+            url = flow.request.pretty_url[:400] if flow.request else "-"
+            with open(REQLOG, "a") as fh:
+                fh.write("%.3f\t%s\t%s\t%s\t0\t0\tmitm-error\n" %
+                         (time.time(), ip, "ERR", url))
+        except Exception:
+            pass
 
 
 addons = [CertGate()]

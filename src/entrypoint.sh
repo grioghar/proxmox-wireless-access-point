@@ -107,6 +107,10 @@ fi
 
 python3 /opt/udt/portal.py & pids+=($!)
 
+if [ "${UDT_MONITOR:-1}" = "1" ]; then
+  python3 /opt/udt/monitor.py & pids+=($!)
+fi
+
 # Optionally shrink the radio so the cell does not spill past the building.
 if [ -n "${UDT_TXPOWER:-}" ]; then
   iw dev "$UDT_IFACE" set txpower fixed "$UDT_TXPOWER" 2>/dev/null \

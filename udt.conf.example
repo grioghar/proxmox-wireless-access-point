@@ -61,3 +61,12 @@ UDT_MITM_CHECK_HOST=mitm-check.udt
 # image-flipped guest and sees no error. This is what lets a single radio serve
 # both audiences at once. Requires UDT_MITM=1.
 UDT_MITM_AUTO=0
+
+# ---- live operator dashboard ----------------------------------------------
+# Shows associated stations, classification, throughput and a live request tail.
+# It binds to the UPLINK address only and udt-net drops AP traffic aimed at this
+# port, because this page exposes names, emails and browsing history.
+UDT_MONITOR=1
+UDT_MONITOR_PORT=8090
+# Leave blank to auto-detect the uplink IP. Never set this to 0.0.0.0.
+UDT_MONITOR_BIND=

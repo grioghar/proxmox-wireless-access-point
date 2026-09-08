@@ -9,6 +9,11 @@
   udtctl kick <mac>                revoke authorization
   udtctl export [file.csv]         dump the consent ledger
 
+  udtctl config                    show the running configuration
+  udtctl config keys               list every tunable and what it does
+  udtctl config set <KEY> <VALUE>  change one, with validation
+  udtctl config get <KEY>
+
   udtctl allow <mac>               lab mode: let this device associate at all
   udtctl deny <mac>                lab mode: remove it
   udtctl allowed                   lab mode: list the allowlist
@@ -17,7 +22,7 @@
                                    effect if that device has installed the CA;
                                    otherwise its HTTPS simply fails.
 """
-import csv, os, sqlite3, subprocess, sys
+import csv, os, re, sqlite3, subprocess, sys
 
 DB_PATH = os.environ.get("UDT_DB", "/var/lib/udt/udt.db")
 NETSH = os.environ.get("UDT_NETSH", "/opt/udt/udt-net.sh")
@@ -98,6 +103,144 @@ def cmd_kick(args):
 
 
 ALLOWED = os.environ.get("UDT_ALLOWED", "/etc/udt/allowed_macs")
+CONF = os.environ.get("UDT_CONF", "/etc/udt/udt.conf")
+SERVICE = os.environ.get("UDT_SERVICE", "upside-down-ternet")
+
+# key -> (validator, needs_restart, description)
+BOOL = ("0", "1")
+
+
+def _int(lo, hi):
+    def f(v):
+        return v.isdigit() and lo <= int(v) <= hi
+    return f
+
+
+def _rate(v):
+    return bool(re.match(r"^\d+(kbit|mbit|gbit|bit)$", v, re.I))
+
+
+def _ip(v):
+    return bool(re.match(r"^\d{1,3}(\.\d{1,3}){3}$", v))
+
+
+CONFIG_KEYS = {
+    "UDT_SSID":            (lambda v: 0 < len(v) <= 32, True,  "network name"),
+    "UDT_CHANNEL":         (_int(1, 196),               True,  "radio channel"),
+    "UDT_HW_MODE":         (lambda v: v in ("g", "a"),  True,  "g=2.4GHz a=5GHz"),
+    "UDT_COUNTRY":         (lambda v: len(v) == 2,      True,  "regulatory country"),
+    "UDT_PASSPHRASE":      (lambda v: v == "" or 8 <= len(v) <= 63, True,
+                            "WPA2 passphrase; blank = open"),
+    "UDT_MODE":            (lambda v: v in ("public", "lab"), True,
+                            "public=open portal, lab=WPA2+allowlist"),
+    "UDT_TXPOWER":         (lambda v: v == "" or v.isdigit(), True,
+                            "mBm, e.g. 800 = 8dBm; blank = max"),
+    "UDT_RATE":            (_rate, False, "guest cap"),
+    "UDT_RATE_STANDARD":   (_rate, False, "standard tier cap"),
+    "UDT_RATE_TRUSTED":    (_rate, False, "trusted tier cap"),
+    "UDT_FLIP":            (lambda v: v in BOOL, True,  "flip images on HTTP"),
+    "UDT_RETENTION_DAYS":  (_int(0, 3650), False, "consent record retention"),
+    "UDT_MITM":            (lambda v: v in BOOL, True,  "enable TLS interception"),
+    "UDT_MITM_AUTO":       (lambda v: v in BOOL, True,
+                            "auto-promote devices that trust the CA"),
+    "UDT_MITM_PORT":       (_int(1, 65535), True, "mitmproxy transparent port"),
+    "UDT_MITM_CHECK_PORT": (_int(1, 65535), True, "cert-check HTTPS port"),
+    "UDT_MITM_CHECK_HOST": (lambda v: bool(v), True, "cert-check hostname"),
+    "UDT_MONITOR":         (lambda v: v in BOOL, True,  "enable operator dashboard"),
+    "UDT_MONITOR_PORT":    (_int(1, 65535), True, "dashboard port"),
+    "UDT_MONITOR_BIND":    (lambda v: v == "" or (_ip(v) and v != "0.0.0.0"), True,
+                            "dashboard bind IP; blank = uplink. 0.0.0.0 refused"),
+    "UDT_DNS1":            (_ip, True, "upstream DNS"),
+    "UDT_DNS2":            (_ip, True, "upstream DNS"),
+    "UDT_RETENTION":       (_int(0, 3650), False, "(alias)"),
+}
+SECRET_KEYS = ("UDT_PASSPHRASE",)
+
+
+def _read_conf():
+    out, order = {}, []
+    if os.path.exists(CONF):
+        for line in open(CONF):
+            s = line.strip()
+            if s and not s.startswith("#") and "=" in s:
+                k, v = s.split("=", 1)
+                out[k.strip()] = v.strip()
+                order.append(k.strip())
+    return out, order
+
+
+def _write_conf(key, value):
+    lines = open(CONF).read().splitlines() if os.path.exists(CONF) else []
+    done = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(key + "="):
+            lines[i] = "%s=%s" % (key, value)
+            done = True
+            break
+    if not done:
+        lines.append("%s=%s" % (key, value))
+    tmp = CONF + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONF)
+
+
+def cmd_config(args):
+    cur, _ = _read_conf()
+    if not args or args[0] == "show":
+        for k in sorted(cur):
+            v = "<set, %d chars>" % len(cur[k]) if k in SECRET_KEYS and cur[k] else cur[k]
+            desc = CONFIG_KEYS.get(k, (None, None, ""))[2]
+            print("  %-22s %-22s %s" % (k, v, desc))
+        return
+    if args[0] == "keys":
+        for k in sorted(CONFIG_KEYS):
+            print("  %-22s %s" % (k, CONFIG_KEYS[k][2]))
+        return
+    if args[0] == "get":
+        if len(args) < 2:
+            print("usage: udtctl config get <KEY>", file=sys.stderr); sys.exit(1)
+        print(cur.get(args[1], ""))
+        return
+    if args[0] != "set" or len(args) < 2:
+        print("usage: udtctl config [show|keys|get <KEY>|set <KEY> <VALUE>]",
+              file=sys.stderr)
+        sys.exit(1)
+
+    key = args[1]
+    value = " ".join(args[2:]) if len(args) > 2 else ""
+    if key not in CONFIG_KEYS:
+        print("unknown key %r -- try 'udtctl config keys'" % key, file=sys.stderr)
+        sys.exit(1)
+    check, restart, _desc = CONFIG_KEYS[key]
+    if not check(value):
+        print("invalid value for %s: %r" % (key, value), file=sys.stderr)
+        if key == "UDT_MONITOR_BIND":
+            print("  refusing 0.0.0.0: that would expose the dashboard, which shows",
+                  file=sys.stderr)
+            print("  names and browsing history, to devices on the AP itself.",
+                  file=sys.stderr)
+        sys.exit(1)
+    # cross-field rule: a private lab must not be an open network
+    if key == "UDT_MODE" and value == "lab" and not cur.get("UDT_PASSPHRASE"):
+        print("refusing: UDT_MODE=lab needs UDT_PASSPHRASE set first.", file=sys.stderr)
+        sys.exit(1)
+    if key == "UDT_PASSPHRASE" and value == "" and cur.get("UDT_MODE") == "lab":
+        print("refusing: cannot clear the passphrase while UDT_MODE=lab.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    _write_conf(key, value)
+    shown = "<set>" if key in SECRET_KEYS and value else (value or "<blank>")
+    print("%s = %s" % (key, shown))
+
+    if not restart:
+        # tier caps are applied by re-running the shaper, no downtime needed
+        subprocess.run([NETSH, "shape"], capture_output=True)
+        print("applied live (no restart needed)")
+    else:
+        print("restart to apply:  systemctl restart %s" % SERVICE)
 
 
 def _reload_hostapd():
@@ -197,6 +340,8 @@ def main():
         cmd_allowed(args)
     elif cmd == "mitm":
         cmd_mitm(args)
+    elif cmd == "config":
+        cmd_config(args)
     elif cmd == "export":
         cmd_export(args)
     else:

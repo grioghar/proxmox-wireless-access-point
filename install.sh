@@ -29,7 +29,7 @@ echo "==> installing to $PREFIX"
 mkdir -p "$PREFIX/templates" /etc/udt /var/lib/udt /var/log/squid /var/run/hostapd
 install -m 0755 "$HERE"/src/*.sh "$PREFIX/"
 install -m 0755 "$HERE"/src/*.py "$PREFIX/"
-install -m 0644 "$HERE"/templates/*.tmpl "$PREFIX/templates/"
+install -m 0644 "$HERE"/templates/* "$PREFIX/templates/"
 ln -sf "$PREFIX/udtctl.py" /usr/local/bin/udtctl
 
 if [ ! -f /etc/squid/dummy.pem ]; then
