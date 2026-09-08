@@ -47,18 +47,24 @@ def resolve(c, ident):
 
 def cmd_who(_):
     c = db()
-    rows = c.execute("""SELECT ts,name,email,phone,mac,ip,hostname,vendor
-                        FROM clients ORDER BY id DESC LIMIT 50""").fetchall()
+    try:
+        rows = c.execute("""SELECT ts,name,email,phone,mac,ip,hostname,vendor,
+                            COALESCE(plex_signup,0) FROM clients
+                            ORDER BY id DESC LIMIT 50""").fetchall()
+    except sqlite3.OperationalError:
+        rows = [r + (0,) for r in c.execute("""SELECT ts,name,email,phone,mac,ip,
+                     hostname,vendor FROM clients ORDER BY id DESC LIMIT 50""")]
     if not rows:
         print("nobody has signed in yet")
         return
     tiers = dict(c.execute("SELECT mac,tier FROM tiers").fetchall())
-    print("%-19s %-18s %-26s %-17s %-9s %s" %
-          ("WHEN", "NAME", "EMAIL", "MAC", "TIER", "DEVICE"))
-    for ts, name, email, phone, mac, ip, host, vend in rows:
-        print("%-19s %-18s %-26s %-17s %-9s %s" %
+    print("%-19s %-18s %-26s %-17s %-9s %-6s %s" %
+          ("WHEN", "NAME", "EMAIL", "MAC", "TIER", "SIGNUP", "DEVICE"))
+    for ts, name, email, phone, mac, ip, host, vend, signup in rows:
+        print("%-19s %-18s %-26s %-17s %-9s %-6s %s" %
               (ts, (name or "")[:18], (email or "")[:26], mac or "",
-               tiers.get(mac, "guest"), host or vend or ""))
+               tiers.get(mac, "guest"), "YES" if signup else "-",
+               host or vend or ""))
     c.close()
 
 
@@ -141,6 +147,9 @@ CONFIG_KEYS = {
     "UDT_FLIP":            (lambda v: v in BOOL, True,  "flip images on HTTP"),
     "UDT_MIN_RATE":        (lambda v: v in ("any", "g", "ofdm", "n", "ht", "ac", "vht"),
                             True, "minimum client: any|g|n|ac (refuses slower devices)"),
+    "UDT_SIGNUP_URL":      (lambda v: v == "" or v.startswith(("http://", "https://")),
+                            True, "mirror this signup page on the portal; blank = off"),
+    "UDT_SIGNUP_LABEL":    (lambda v: True, True, "what to call that service on the portal"),
     "UDT_RETENTION_DAYS":  (_int(0, 3650), False, "consent record retention"),
     "UDT_MITM":            (lambda v: v in BOOL, True,  "enable TLS interception"),
     "UDT_MITM_AUTO":       (lambda v: v in BOOL, True,

@@ -43,6 +43,51 @@ MITM_VERIFIED = os.environ.get("UDT_MITM_VERIFIED", "/var/lib/udt/mitm-verified"
 VERIFY_WINDOW = 600  # seconds a successful handshake stays valid as proof
 
 
+SIGNUP_URL = CFG.get("UDT_SIGNUP_URL", "")
+SIGNUP_LABEL = CFG.get("UDT_SIGNUP_LABEL", "the media server")
+SIGNUP_TTL = 600
+_signup_cache = {"ts": 0.0, "posters": [], "steps": [], "host": ""}
+
+
+def signup_content(force=False):
+    """Mirror the public signup page of another service onto the portal.
+
+    Portal clients are firewalled away from the LAN, so they cannot fetch that
+    site or its images themselves. We pull it here and proxy the artwork through
+    our own origin.
+    """
+    if not SIGNUP_URL:
+        return _signup_cache
+    now = time.time()
+    if not force and _signup_cache["ts"] and now - _signup_cache["ts"] < SIGNUP_TTL:
+        return _signup_cache
+    posters, steps, host = [], [], ""
+    try:
+        import urllib.parse
+        import urllib.request
+        host = urllib.parse.urlparse(SIGNUP_URL).netloc
+        req = urllib.request.Request(SIGNUP_URL, headers={"User-Agent": "udt-portal"})
+        page = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "replace")
+        for m in re.finditer(r"background-image:\s*url\(['\"]?([^'\")]+)", page):
+            p = m.group(1).replace("&amp;", "&")
+            if p.startswith("/") and p not in posters:
+                posters.append(p)
+            if len(posters) >= 8:
+                break
+        m = re.search(r"<h2[^>]*>\s*How it works.*?</h2>(.{0,1500})", page, re.S)
+        if m:
+            txt = re.sub(r"<[^>]+>", " ", m.group(1))
+            txt = html.unescape(re.sub(r"\s+", " ", txt)).strip()
+            for sep in ("Request access below", "Watch anywhere"):
+                txt = txt.replace(sep, "|" + sep)
+            steps = [s.strip() for s in txt.split("|") if s.strip()][:3]
+    except Exception:
+        pass
+    if posters or steps:
+        _signup_cache.update(ts=now, posters=posters, steps=steps, host=host)
+    return _signup_cache
+
+
 def recently_verified(ip):
     """True only if this IP completed a real TLS handshake against the check
     endpoint recently. That handshake is impossible without trusting the CA, so
@@ -79,6 +124,9 @@ def db():
         kind TEXT, detail TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS tiers(
         mac TEXT PRIMARY KEY, tier TEXT NOT NULL, note TEXT)""")
+    # added later; migrate in place so existing ledgers keep working
+    if "plex_signup" not in [r[1] for r in c.execute("PRAGMA table_info(clients)")]:
+        c.execute("ALTER TABLE clients ADD COLUMN plex_signup INTEGER DEFAULT 0")
     return c
 
 
@@ -189,6 +237,16 @@ input:focus{outline:2px solid #1f6feb;border-color:#1f6feb}
 button{width:100%%;margin-top:18px;padding:12px;border:0;border-radius:7px;background:#238636;
   color:#fff;font-size:15px;font-weight:600;cursor:pointer}
 .err{color:#ff9d95;font-size:13px;margin-top:10px}
+.su{margin-top:20px;padding-top:16px;border-top:1px solid #30363d}
+.su h3{font-size:13px;margin:0 0 4px;color:#e6edf3}
+.su p{font-size:12px;color:#8b949e;margin:0 0 10px;line-height:1.5}
+.su ol{margin:0 0 12px;padding-left:18px;font-size:12px;color:#8b949e}
+.su ol li{margin:4px 0}
+.posters{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-bottom:12px}
+.posters div{padding-top:150%%;background-size:cover;background-position:center;
+  border-radius:5px;border:1px solid #30363d;
+  transform:rotate(180deg)}
+.su .agree{margin:12px 0 0}
 </style></head><body><div class="wrap">
 <h1>Hey %(greeting)s</h1>
 <div class="sub">You are connected to <b>%(ssid)s</b>, an open wireless network.</div>
@@ -210,6 +268,7 @@ neither does your device. Everything below was collected before you typed anythi
 <div class="agree"><input type="checkbox" id="a" name="agree" value="1" required>
 <label for="a" style="margin:0;color:#c9d1d9">I understand that all of my activity on this
 network is monitored, recorded and retained, and I consent to it.</label></div>
+%(signup)s
 <button type="submit" id="b">Agree &amp; connect</button>
 %(error)s
 </div>
@@ -400,12 +459,64 @@ class Portal(BaseHTTPRequestHandler):
             probe = AUTOPROBE % {"host": MITM_HOST, "cport": MITM_CPORT}
         self._send(PAGE % {"ssid": html.escape(SSID), "greeting": html.escape(greet),
                            "facts": facts, "error": err, "retention": ret,
-                           "autoprobe": probe})
+                           "autoprobe": probe, "signup": self._signup_html()})
+
+    def _signup_html(self):
+        if not SIGNUP_URL:
+            return ""
+        c = signup_content()
+        if not (c["posters"] or c["steps"]):
+            return ""
+        from urllib.parse import quote
+        tiles = "".join(
+            '<div style="background-image:url(/signupimg?p=%s)"></div>' % quote(p, safe="")
+            for p in c["posters"][:8])
+        steps = "".join("<li>%s</li>" % html.escape(s) for s in c["steps"])
+        return (
+            '<div class="su"><h3>While you are here &mdash; want in on %s?</h3>'
+            '<p>Tick the box and I will pass your details along as an access '
+            'request. Nothing else happens, and you can ignore this entirely.</p>'
+            '%s%s'
+            '<div class="agree"><input type="checkbox" id="ps" name="plex_signup" value="1">'
+            '<label for="ps" style="margin:0;color:#c9d1d9">Yes, request access to %s '
+            'for me using the details above.</label></div></div>'
+            % (html.escape(SIGNUP_LABEL),
+               ('<div class="posters">%s</div>' % tiles) if tiles else "",
+               ("<ol>%s</ol>" % steps) if steps else "",
+               html.escape(SIGNUP_LABEL)))
 
     def do_GET(self):
         p = urlparse(self.path).path
         if MITM_ENABLED and p == "/mitm":
             return self._send(MITM_PAGE % {"host": MITM_HOST, "cport": MITM_CPORT})
+        if SIGNUP_URL and p == "/signupimg":
+            # Proxy artwork from the signup site. Path-restricted and pinned to
+            # that origin so this cannot be turned into an open relay.
+            from urllib.parse import parse_qs, urlsplit, urlunsplit
+            want = (parse_qs(urlparse(self.path).query).get("p", [""])[0] or "")
+            if not want.startswith("/") or ".." in want:
+                return self.send_error(400)
+            base = urlsplit(SIGNUP_URL)
+            target = urlunsplit((base.scheme, base.netloc, "", "", ""))
+            try:
+                import urllib.request
+                r = urllib.request.urlopen(target + want, timeout=12)
+                data, ctype = r.read(3 * 1024 * 1024), r.headers.get("Content-Type", "image/jpeg")
+                r.close()
+            except Exception:
+                return self.send_error(502)
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "max-age=600")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            self.close_connection = True
+            return
         if MITM_ENABLED and p == "/ca.crt":
             try:
                 data = open(MITM_CA, "rb").read()
@@ -478,11 +589,12 @@ class Portal(BaseHTTPRequestHandler):
 
         c = db()
         c.execute("""INSERT INTO clients(ts,mac,ip,hostname,vendor,name,email,phone,
-                     agreed,user_agent,accept_language,fingerprint)
-                     VALUES(?,?,?,?,?,?,?,?,1,?,?,?)""",
+                     agreed,user_agent,accept_language,fingerprint,plex_signup)
+                     VALUES(?,?,?,?,?,?,?,?,1,?,?,?,?)""",
                   (time.strftime("%Y-%m-%dT%H:%M:%S"), mac, ip, host, vendor(mac),
                    name, email, phone, self.headers.get("User-Agent", ""),
-                   self.headers.get("Accept-Language", ""), get("fp")))
+                   self.headers.get("Accept-Language", ""), get("fp"),
+                   1 if get("plex_signup") else 0))
         # An operator may have pre-assigned this device a better tier.
         row = c.execute("SELECT tier FROM tiers WHERE mac=?", (mac,)).fetchone()
         tier = row[0] if row else "guest"
