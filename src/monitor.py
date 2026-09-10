@@ -13,13 +13,49 @@ import html, json, os, re, socket, sqlite3, subprocess, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONF = os.environ.get("UDT_CONF", "/etc/udt/udt.conf")
+
+
+def _cfg_value(raw):
+    """Reduce one `KEY=` right-hand side to the value bash would see: drop a
+    trailing ` # comment`, then strip the shell quoting.
+
+    entrypoint.sh `source`s this same file, so both halves matter. Unquoted
+    `UDT_SIGNUP_LABEL=my Plex server` sets the label to "my" and then makes
+    bash try to run `Plex`; an inline comment bash ignores would otherwise end
+    up inside the value on this side.
+
+    One deliberate divergence: for a legacy unquoted `KEY=two words` bash keeps
+    only "two" (and tries to run the rest), while this returns the whole string.
+    Being forgiving on the read side is more useful than reproducing the bug.
+    """
+    out, quote = [], ""
+    for i, ch in enumerate(raw):
+        if quote:
+            out.append(ch)
+            if ch == quote and (quote == "'" or raw[i - 1] != "\\"):
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+            out.append(ch)
+        elif ch == "#" and i and raw[i - 1].isspace():
+            break
+        else:
+            out.append(ch)
+    v = "".join(out).strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        q, v = v[0], v[1:-1]
+        if q == '"':
+            v = re.sub(r'\\([$`"\\])', r"\1", v)
+    return v
+
+
 CFG = {}
 if os.path.exists(CONF):
     for line in open(CONF):
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
-            CFG[k.strip()] = v.strip()
+            CFG[k.strip()] = _cfg_value(v)
 
 IFACE = CFG.get("UDT_IFACE", "wlan0")
 UPLINK = CFG.get("UDT_UPLINK", "eth0")

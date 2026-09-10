@@ -178,6 +178,50 @@ CONFIG_KEYS = {
 SECRET_KEYS = ("UDT_PASSPHRASE",)
 
 
+def _cfg_value(raw):
+    """Reduce one `KEY=` right-hand side to the value bash would see: drop a
+    trailing ` # comment`, then strip the shell quoting.
+
+    entrypoint.sh `source`s this same file, so both halves matter. Unquoted
+    `UDT_SIGNUP_LABEL=my Plex server` sets the label to "my" and then makes
+    bash try to run `Plex`; an inline comment bash ignores would otherwise end
+    up inside the value on this side.
+
+    One deliberate divergence: for a legacy unquoted `KEY=two words` bash keeps
+    only "two" (and tries to run the rest), while this returns the whole string.
+    Being forgiving on the read side is more useful than reproducing the bug.
+    """
+    out, quote = [], ""
+    for i, ch in enumerate(raw):
+        if quote:
+            out.append(ch)
+            if ch == quote and (quote == "'" or raw[i - 1] != "\\"):
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+            out.append(ch)
+        elif ch == "#" and i and raw[i - 1].isspace():
+            break
+        else:
+            out.append(ch)
+    v = "".join(out).strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        q, v = v[0], v[1:-1]
+        if q == '"':
+            v = re.sub(r'\\([$`"\\])', r"\1", v)
+    return v
+
+
+def _conf_quote(value):
+    """The inverse. Unquoted `UDT_SIGNUP_LABEL=my Plex server` makes the shell
+    set the label to "my" and then try to run `Plex` as a command, so anything
+    with whitespace or a shell metacharacter goes in double-quoted."""
+    v = str(value)
+    if v and not re.search(r"[^\w@%+=:,./-]", v):
+        return v
+    return '"' + re.sub(r'([$`"\\])', r"\\\1", v) + '"'
+
+
 def _read_conf():
     out, order = {}, []
     if os.path.exists(CONF):
@@ -185,7 +229,7 @@ def _read_conf():
             s = line.strip()
             if s and not s.startswith("#") and "=" in s:
                 k, v = s.split("=", 1)
-                out[k.strip()] = v.strip()
+                out[k.strip()] = _cfg_value(v)
                 order.append(k.strip())
     return out, order
 
@@ -195,11 +239,11 @@ def _write_conf(key, value):
     done = False
     for i, line in enumerate(lines):
         if line.strip().startswith(key + "="):
-            lines[i] = "%s=%s" % (key, value)
+            lines[i] = "%s=%s" % (key, _conf_quote(value))
             done = True
             break
     if not done:
-        lines.append("%s=%s" % (key, value))
+        lines.append("%s=%s" % (key, _conf_quote(value)))
     tmp = CONF + ".tmp"
     with open(tmp, "w") as fh:
         fh.write("\n".join(lines) + "\n")

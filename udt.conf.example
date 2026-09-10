@@ -94,4 +94,4 @@ UDT_MIN_RATE=g
 # Portal clients are firewalled off the LAN, so artwork is proxied through the
 # portal's own origin. Blank disables the whole section.
 UDT_SIGNUP_URL=
-UDT_SIGNUP_LABEL=the media server
+UDT_SIGNUP_LABEL="the media server"   # quote anything with spaces: this file is sourced by the shell

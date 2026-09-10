@@ -14,13 +14,49 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 CONF = os.environ.get("UDT_CONF", "/etc/udt/udt.conf")
+
+
+def _cfg_value(raw):
+    """Reduce one `KEY=` right-hand side to the value bash would see: drop a
+    trailing ` # comment`, then strip the shell quoting.
+
+    entrypoint.sh `source`s this same file, so both halves matter. Unquoted
+    `UDT_SIGNUP_LABEL=my Plex server` sets the label to "my" and then makes
+    bash try to run `Plex`; an inline comment bash ignores would otherwise end
+    up inside the value on this side.
+
+    One deliberate divergence: for a legacy unquoted `KEY=two words` bash keeps
+    only "two" (and tries to run the rest), while this returns the whole string.
+    Being forgiving on the read side is more useful than reproducing the bug.
+    """
+    out, quote = [], ""
+    for i, ch in enumerate(raw):
+        if quote:
+            out.append(ch)
+            if ch == quote and (quote == "'" or raw[i - 1] != "\\"):
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+            out.append(ch)
+        elif ch == "#" and i and raw[i - 1].isspace():
+            break
+        else:
+            out.append(ch)
+    v = "".join(out).strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        q, v = v[0], v[1:-1]
+        if q == '"':
+            v = re.sub(r'\\([$`"\\])', r"\1", v)
+    return v
+
+
 CFG = {}
 if os.path.exists(CONF):
     for line in open(CONF):
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
-            CFG[k.strip()] = v.strip()
+            CFG[k.strip()] = _cfg_value(v)
 
 DB_PATH = os.environ.get("UDT_DB", "/var/lib/udt/udt.db")
 LEASES = os.environ.get("UDT_LEASES", "/var/lib/udt/dnsmasq.leases")
@@ -68,19 +104,32 @@ def signup_content(force=False):
         host = urllib.parse.urlparse(SIGNUP_URL).netloc
         req = urllib.request.Request(SIGNUP_URL, headers={"User-Agent": "udt-portal"})
         page = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "replace")
-        for m in re.finditer(r"background-image:\s*url\(['\"]?([^'\")]+)", page):
-            p = m.group(1).replace("&amp;", "&")
+        for m in re.finditer(
+                r"background-image:\s*url\(['\"]?([^'\")]+)"
+                r"|<img\b[^>]+src=['\"]([^'\"]+)", page):
+            p = (m.group(1) or m.group(2)).replace("&amp;", "&")
             if p.startswith("/") and p not in posters:
                 posters.append(p)
             if len(posters) >= 8:
                 break
-        m = re.search(r"<h2[^>]*>\s*How it works.*?</h2>(.{0,1500})", page, re.S)
-        if m:
-            txt = re.sub(r"<[^>]+>", " ", m.group(1))
-            txt = html.unescape(re.sub(r"\s+", " ", txt)).strip()
-            for sep in ("Request access below", "Watch anywhere"):
-                txt = txt.replace(sep, "|" + sep)
-            steps = [s.strip() for s in txt.split("|") if s.strip()][:3]
+        # Steps come out of the real list markup. The previous version flattened
+        # everything after the heading and split it on phrases from that site's
+        # copy, with no end bound -- so when the page was redesigned the last
+        # "step" swallowed the following card, escaped tags and all.
+        m = re.search(r"<h2[^>]*>\s*How it works.*?</h2>(.{0,4000})", page, re.S)
+        tail = m.group(1) if m else ""
+        lst = re.search(r"<(ol|ul)\b[^>]*>(.*?)</\1>", tail, re.S)
+        if lst:
+            items = re.findall(r"<li\b[^>]*>(.*?)</li>", lst.group(2), re.S)
+        else:
+            # No list to work with. Stop at the next heading so we cannot run on
+            # into unrelated markup, and break on paragraph boundaries.
+            items = re.split(r"</p>|<br\s*/?>", re.split(r"<h[1-6]\b", tail)[0])
+        for it in items:
+            t = html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", it))).strip()
+            if t:
+                steps.append(t[:240])
+        steps = steps[:3]
     except Exception:
         pass
     if posters or steps:
