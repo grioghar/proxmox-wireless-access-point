@@ -18,6 +18,9 @@ HOSTNAME_="${HOSTNAME_:-upside-down-ternet}"
 BRIDGE="${BRIDGE:-vmbr0}"
 STORAGE="${STORAGE:-local-lvm}"
 TEMPLATE_STORE="${TEMPLATE_STORE:-local}"
+# Set TMPL_VOLID to pin an exact template, e.g.
+#   TMPL_VOLID=local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst
+TMPL_VOLID="${TMPL_VOLID:-}"
 DISK="${DISK:-4}"
 MEMORY="${MEMORY:-512}"
 PHY="${PHY:-}"
@@ -47,7 +50,7 @@ pct status "$CTID" >/dev/null 2>&1 && die "CT $CTID already exists; set CTID=<fr
 # ---- template ---------------------------------------------------------------
 # Prefer a template that is already downloaded; only reach for the network if
 # the host has none.
-TMPL_VOLID=$(pveam list "$TEMPLATE_STORE" 2>/dev/null \
+[ -n "$TMPL_VOLID" ] || TMPL_VOLID=$(pveam list "$TEMPLATE_STORE" 2>/dev/null \
              | awk '/debian-1[0-9]-standard/{print $1}' | sort -r | head -1)
 if [ -z "$TMPL_VOLID" ]; then
   TMPL=$(pveam available 2>/dev/null | awk '/debian-13-standard/{print $2}' | sort -r | head -1)
@@ -94,19 +97,27 @@ pct exec "$CTID" -- mkdir -p /opt/udt-src
 tar -C "$REPO" -cf - src templates install.sh wizard.sh udt.conf.example \
   | pct exec "$CTID" -- tar -C /opt/udt-src -xf -
 pct exec "$CTID" -- chmod +x /opt/udt-src/install.sh /opt/udt-src/wizard.sh
-pct exec "$CTID" -- bash -lc "cd /opt/udt-src && ./install.sh" || true
+# Do not let a failed install pass silently -- that is how a container gets
+# built that nothing was ever installed into.
+if ! pct exec "$CTID" -- bash -lc "cd /opt/udt-src && ./install.sh"; then
+  echo "!! the in-container installer FAILED. CT $CTID exists but is not provisioned." >&2
+  echo "   re-run it with: pct exec $CTID -- bash -lc 'cd /opt/udt-src && ./install.sh'" >&2
+fi
 
 # Re-apply the handoff on every host boot, before the CT's service needs it.
+# The phy is deliberately NOT passed: phy numbering is not stable across a
+# driver reload (a `modprobe -r iwlwifi` renumbers phy0 to phy1), and a unit
+# pinned to the old name silently hands off nothing. The script auto-detects.
 cat > /etc/systemd/system/udt-phy-handoff.service <<UNIT
 [Unit]
-Description=Hand wireless PHY $PHY to LXC $CTID (upside-down-ternet)
+Description=Hand the wireless PHY to LXC $CTID (upside-down-ternet)
 After=pve-guests.service
 Wants=pve-guests.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=$(cd "$(dirname "$0")" && pwd)/udt-phy-handoff.sh $CTID $PHY
+ExecStart=$(cd "$(dirname "$0")" && pwd)/udt-phy-handoff.sh $CTID
 
 [Install]
 WantedBy=multi-user.target
