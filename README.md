@@ -61,6 +61,18 @@ If 5 GHz refuses to start, it is almost never a broken card:
   (`IR-CONCURRENT`), which is useless for a standalone AP.
 - `iw phy info` will happily list a channel as available that the kernel then
   refuses to beacon on. **Trust hostapd's error, not `iw`.**
+- The sharpest version of that last point: once `wireless-regdb` is installed, a
+  single `iw dev <iface> scan` can flip a self-managed card from `country 00` to
+  the country its neighbours advertise, and `iw reg get` will then show UNII-1
+  completely clean — no `no IR`, no `PASSIVE-SCAN`. It is still a lie. hostapd
+  refuses the same channel with `Frequency 5180 (primary) not allowed for AP
+  mode, flags: 0x30053 NO-IR`, and the borrowed domain lapses within seconds —
+  a second scan comes back `country 00`. Measured on an AX210; the AX200 behaves
+  the same. A clean `iw reg get` is not evidence that you can beacon.
+- Inside an LXC, `iw reg set` is a **no-op that reports success**: it returns 0
+  and changes nothing, because cfg80211's regulatory core only accepts requests
+  from the host's init netns. Moving the phy into a container's netns also resets
+  it to `country 00`. Set the domain on the host if you need it set at all.
 
 Two things to verify:
 
